@@ -1,0 +1,32 @@
+node_modules/
+.next/
+out/
+build/
+dist/
+coverage/
+*.tsbuildinfo
+next-env.d.ts
+
+# Secrets — the only permitted env file in git is .env.example
+.env
+.env.*
+!.env.example
+
+# Generated widget bundle (built at CI/deploy time)
+public/widget.js
+public/widget.js.map
+
+# Local scratch
+tmp/
+*.local
+.DS_Store
+Thumbs.db
+
+# Sentry
+.sentryclirc
+
+# Editors
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json

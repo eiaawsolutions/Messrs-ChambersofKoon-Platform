@@ -1,0 +1,133 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  quality:
+    name: Lint, typecheck, test
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg17
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: matter_velocity_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    env:
+      DATABASE_URL: postgresql://postgres:postgres@localhost:5432/matter_velocity_test
+      DIRECT_URL: postgresql://postgres:postgres@localhost:5432/matter_velocity_test
+      AUTH_SECRET: ci-only-not-a-real-secret-0123456789abcdef
+      FIELD_ENCRYPTION_KEY: Y2ktb25seS0zMi1ieXRlLWtleS1mb3ItdGVzdHMhIQ==
+      APP_BASE_URL: http://localhost:3000
+      EMBEDDING_DIMENSIONS: '1024'
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Format check
+        run: npm run format:check
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Migrate test database
+        run: npm run db:migrate
+
+      - name: Unit + integration tests
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+  security:
+    name: Dependency + secret scan
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      # NFR-1.5: no high-severity vulnerabilities merged.
+      - name: npm audit (high+)
+        run: npm audit --audit-level=high
+
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  evals:
+    name: AI eval suite
+    runs-on: ubuntu-latest
+    # AI-5: eval suite gates merges, but only when the AI surface changes —
+    # every PR would burn model spend for no signal.
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Detect AI-surface changes
+        id: changed
+        run: |
+          if git diff --name-only origin/${{ github.base_ref }}...HEAD \
+             | grep -qE '^(src/lib/ai/|src/lib/rag/|evals/)'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/setup-node@v5
+        if: steps.changed.outputs.run == 'true'
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install
+        if: steps.changed.outputs.run == 'true'
+        run: npm ci
+
+      - name: Run evals
+        if: steps.changed.outputs.run == 'true'
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL_DRAFTING: claude-sonnet-5
+          ANTHROPIC_MODEL_CLASSIFY: claude-haiku-4-5-20251001
+        run: npm run evals
