@@ -1,5 +1,6 @@
 import 'dotenv/config';
-import { getBoss, JOBS, stopBoss, enqueue } from '@/lib/jobs/queue';
+import { createServer, type Server } from 'node:http';
+import { getBoss, JOBS, stopBoss, enqueue, queueDepths } from '@/lib/jobs/queue';
 import { stopPool } from '@/lib/db/client';
 import { buildCaseBrief } from '@/lib/intake/triage';
 import { expireStaleProposals, proposeSlot } from '@/lib/scheduling/service';
@@ -23,6 +24,51 @@ import { runDraftGeneration } from '@/lib/documents/generate';
  */
 
 type Handler<T> = (data: T) => Promise<void>;
+
+let healthServer: Server | null = null;
+let ready = false;
+
+/**
+ * Liveness endpoint for the worker.
+ *
+ * A background worker with no health signal is one that can die quietly and
+ * take the intake pipeline with it — enquiries would keep arriving and simply
+ * never be triaged. Serving `/api/health` lets the platform's own healthcheck
+ * and the external uptime monitor see the worker the same way they see the web
+ * service, and it reports queue depth so a stuck queue is visible.
+ */
+function startHealthServer(): void {
+  const port = Number(process.env.PORT ?? 3000);
+
+  healthServer = createServer((req, res) => {
+    if (!req.url?.startsWith('/api/health')) {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found' }));
+      return;
+    }
+
+    void (async () => {
+      const depths = ready ? await queueDepths().catch(() => []) : [];
+      const failed = depths.reduce((sum, q) => sum + q.failed, 0);
+      const body = JSON.stringify({
+        status: ready ? 'ok' : 'starting',
+        role: 'worker',
+        queues: depths.length,
+        pending: depths.reduce((sum, q) => sum + q.queued + q.active, 0),
+        failed,
+      });
+      res.writeHead(ready ? 200 : 503, {
+        'content-type': 'application/json',
+        'cache-control': 'no-store',
+      });
+      res.end(body);
+    })();
+  });
+
+  healthServer.listen(port, () => {
+    console.log(`[worker] health endpoint listening on ${port}`);
+  });
+}
 
 /** Wrap a handler so a thrown error is logged with context before pg-boss retries. */
 function handler<T extends object>(name: string, fn: Handler<T>) {
@@ -58,6 +104,10 @@ function handler<T extends object>(name: string, fn: Handler<T>) {
 }
 
 async function main(): Promise<void> {
+  // Serve health immediately so the platform healthcheck has a target while
+  // handlers are still registering; it reports 503 until they are ready.
+  startHealthServer();
+
   const boss = await getBoss();
   console.log('[worker] started');
 
@@ -154,12 +204,15 @@ async function main(): Promise<void> {
   await boss.schedule(JOBS.SLA_SWEEP, '0 8 * * 1-5', {}, { tz: 'Asia/Kuala_Lumpur' });
   await boss.schedule(JOBS.PRUNE_RATE_LIMITS, '0 3 * * *', {}, { tz: 'Asia/Kuala_Lumpur' });
 
+  ready = true;
   console.log('[worker] handlers registered; awaiting jobs');
 }
 
 async function shutdown(signal: string): Promise<void> {
   console.log(`[worker] ${signal} received, draining`);
+  ready = false;
   try {
+    healthServer?.close();
     await stopBoss();
     await stopPool();
   } finally {
