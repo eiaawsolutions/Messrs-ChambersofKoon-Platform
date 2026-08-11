@@ -145,6 +145,17 @@ export function isProduction(): boolean {
 }
 
 /**
+ * Domain used to qualify iCalendar UIDs. Exchange treats an invitation whose
+ * UID domain the organiser does not control as spoofed, so this follows the
+ * sending address rather than the app's own hostname.
+ */
+export function senderDomain(): string {
+  const address = config().RESEND_FROM_ADDRESS;
+  const at = address.lastIndexOf('@');
+  return at >= 0 ? address.slice(at + 1) : 'chambersofkoon.com.my';
+}
+
+/**
  * Startup diagnostic: which secrets are still unset, and which are handles
  * awaiting the resolver. Surfaced on the admin health page so a misconfigured
  * deploy is visible before someone hits the feature that needs the key —

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { enforceMfa, hasMfaClaim, isDomainAllowed } from './auth';
+import { enforceMfa, hasMfaClaim, isDomainAllowed } from './policy';
 
 describe('FR-1.3 — email domain allow-list', () => {
   const domains = ['chambersofkoon.com.my'];

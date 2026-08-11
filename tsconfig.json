@@ -17,9 +17,13 @@
     "resolveJsonModule": true,
     "isolatedModules": true,
     "verbatimModuleSyntax": false,
-    "jsx": "preserve",
+    "jsx": "react-jsx",
     "incremental": true,
-    "plugins": [{ "name": "next" }],
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
     "paths": {
       "@/*": ["./src/*"]
     }
@@ -30,7 +34,8 @@
     "**/*.tsx",
     ".next/types/**/*.ts",
     "scripts/**/*.ts",
-    "evals/**/*.ts"
+    "evals/**/*.ts",
+    ".next/dev/types/**/*.ts"
   ],
   "exclude": ["node_modules", ".next", "public/widget"]
 }

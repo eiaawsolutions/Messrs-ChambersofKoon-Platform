@@ -9,7 +9,7 @@
   "scripts": {
     "dev": "next dev",
     "build": "npm run widget:build && next build",
-    "start": "next start -p ${PORT:-3000}",
+    "start": "next start",
     "worker": "tsx --conditions=react-server src/jobs/worker.ts",
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",

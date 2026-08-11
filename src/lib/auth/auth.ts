@@ -7,6 +7,7 @@ import { roles, users } from '@/lib/db/schema';
 import { allowedEmailDomains, config, optionalSecret, secret } from '@/lib/config/env';
 import { audit, AUDIT_ACTIONS } from '@/lib/audit/log';
 import { ROLE_NAMES } from '@/lib/auth/permissions';
+import { enforceMfa, isDomainAllowed } from '@/lib/auth/policy';
 
 /**
  * Authentication (M1, FR-1.1 – FR-1.4).
@@ -22,52 +23,6 @@ import { ROLE_NAMES } from '@/lib/auth/permissions';
  * suspend / 2FA reset bumps the counter on the user, and `getActor()` compares
  * the token's epoch against the database on every server request (AT-07).
  */
-
-/** True when the ID token carries evidence the IdP enforced a second factor. */
-export function hasMfaClaim(profile: Record<string, unknown> | undefined): boolean {
-  if (!profile) return false;
-
-  // Microsoft Entra: amr contains "mfa"; acr "1" historically meant MFA.
-  const amr = profile.amr;
-  if (Array.isArray(amr) && amr.some((m) => typeof m === 'string' && /mfa|otp|fido|hwk/i.test(m))) {
-    return true;
-  }
-  // Google Workspace does not emit amr; it does not surface an MFA claim at
-  // all. Absence is therefore not evidence of absence — see enforceMfa().
-  const acr = profile.acr;
-  if (typeof acr === 'string' && /mfa|aal2|aal3/i.test(acr)) return true;
-
-  return false;
-}
-
-/**
- * FR-1.2: "Reject a session whose token lacks an MFA claim where the provider
- * supplies one; surface a setup prompt on first login otherwise."
- *
- * Entra supplies `amr`, so a missing MFA claim there is a real signal and the
- * session is rejected. Google does not supply one, so rejecting would lock the
- * whole firm out; instead the account is flagged and the dashboard shows a
- * 2-step-verification setup prompt.
- */
-export function enforceMfa(
-  provider: string,
-  profile: Record<string, unknown> | undefined,
-): { allowed: boolean; promptSetup: boolean } {
-  const providerSuppliesClaim = provider === 'microsoft-entra-id';
-  const present = hasMfaClaim(profile);
-
-  if (providerSuppliesClaim) {
-    return { allowed: present, promptSetup: false };
-  }
-  return { allowed: true, promptSetup: !present };
-}
-
-export function isDomainAllowed(email: string, domains: string[]): boolean {
-  const at = email.lastIndexOf('@');
-  if (at < 0) return false;
-  const domain = email.slice(at + 1).toLowerCase();
-  return domains.includes(domain);
-}
 
 async function buildProviders(): Promise<NextAuthConfig['providers']> {
   const providers: NextAuthConfig['providers'] = [];

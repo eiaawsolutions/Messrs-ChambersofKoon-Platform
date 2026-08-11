@@ -76,6 +76,15 @@ export const db: DrizzleDb = new Proxy({} as DrizzleDb, {
 export type Database = DrizzleDb;
 export { schema };
 
+/** Graceful shutdown for the worker process. */
+export async function stopPool(): Promise<void> {
+  if (globalThis.__mvpPool) {
+    await globalThis.__mvpPool.end();
+    globalThis.__mvpPool = undefined;
+    dbInstance = null;
+  }
+}
+
 /** Used by /api/health (NFR-3.5). */
 export async function databaseHealthCheck(): Promise<{ ok: boolean; latencyMs: number }> {
   const started = Date.now();
