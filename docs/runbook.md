@@ -31,72 +31,82 @@ Point the external uptime monitor at `/api/health` and alert on 503 or on `statu
 
 ---
 
-## 2. Current state and the one remaining step
+## 2. Signing in
 
-Everything is deployed and `/api/health` reports **ok** on all five checks:
-database, storage, queue, Anthropic and the secrets resolver.
+The platform issues its own user IDs and passwords (**PRD amendment A1** —
+supersedes FR-1.1's SSO-only assumption). Sign-in is two steps:
 
-| Piece                      | State                                                                    |
-| -------------------------- | ------------------------------------------------------------------------ |
-| `web` service              | running, migrating and seeding on each deploy                            |
-| `worker` service           | running, handlers registered, serving its own `/api/health`              |
-| Postgres + pgvector        | running, Southeast Asia                                                  |
-| Infisical                  | resolving from `eiaaw-all-projects` / `prod`                             |
-| Object storage             | `eiaaw-smt-prod`, this firm's objects under the `chambersofkoon/` prefix |
-| `eiaawsolutions@gmail.com` | pre-authorised, active, Managing Partner                                 |
+1. **Email and password**
+2. **Six-digit code** from an authenticator app — enrolled on first sign-in
 
-### There is no password, and no password reset
+Between the two the server holds no session, only a signed five-minute
+challenge. A browser that completes step one and stops has access to nothing.
 
-This is the PRD's decision, not an omission. FR-1.1: _"Users sign in via OIDC SSO
-against the firm's Google Workspace or Microsoft 365 tenant. **No local password
-store.**"_ There is no `/forgot-password`, no reset email and no credential to
-create, because a password store is the surface an attacker actually attacks.
+### Getting in the first time
 
-Access is granted by **pre-authorising an address**, which is already done for
-`eiaawsolutions@gmail.com`. Signing in is then one click on "Continue with
-Google" — no password to set, and none to forget.
+`eiaawsolutions@gmail.com` is already an **active Managing Partner**.
 
-### The remaining step: register a Google OAuth client (about five minutes)
+1. Go to `/sign-in` → **Forgotten your password**
+2. Enter the address; a reset link arrives within a minute or two
+3. Set a password — at least 12 characters, nothing connected to you or the firm
+4. Sign in with it
+5. You will be asked to **set up two-step verification**: scan the QR code with
+   Google Authenticator, Microsoft Authenticator, 1Password or similar, then
+   enter the code it shows
+6. **Save the ten recovery codes.** They are shown once. Without them, a lost
+   phone means an administrator has to reset your second step
 
-Nobody can sign in until this exists, because an OAuth client is a
-per-application registration inside a Google Cloud project and cannot be
-borrowed from another product.
+### Creating everyone else
 
-1. <https://console.cloud.google.com/apis/credentials> → select or create a project
-2. **Create credentials → OAuth client ID → Web application**
-3. Name it `Matter Velocity — Chambers of Koon`
-4. Under **Authorised redirect URIs**, add exactly:
-
-   ```
-   https://web-production-782ae5.up.railway.app/api/auth/callback/google
-   ```
-
-5. Create. Copy the **Client ID** and **Client secret**.
-6. Put both in Infisical (`eiaaw-all-projects` → `prod`) as `AUTH_GOOGLE_ID` and
-   `AUTH_GOOGLE_SECRET` — **not** into Railway directly.
-7. Point the handles at them:
-
-   ```bash
-   railway variables --service web      --set 'AUTH_GOOGLE_ID=secret://eiaaw-all-projects/prod/AUTH_GOOGLE_ID'      --set 'AUTH_GOOGLE_SECRET=secret://eiaaw-all-projects/prod/AUTH_GOOGLE_SECRET'
-   ```
-
-If the OAuth consent screen is in **Testing** mode, add
-`eiaawsolutions@gmail.com` under **Test users**, or Google will refuse the
-sign-in.
+Admin → Users → _Create an account_. You receive a temporary password **once**,
+on screen, to hand over in person or by phone. It is deliberately not emailed:
+sending a working credential to a mailbox the firm has not verified is the
+classic account-takeover path. The recipient must change it at first sign-in and
+then enrol an authenticator app.
 
 `ALLOWED_EMAIL_DOMAINS` currently permits `chambersofkoon.com.my`,
-`eiaawsolutions.com` and `gmail.com`. Narrow it to the firm's domain once their
-own partners are onboarded, and clear `BOOTSTRAP_ADMIN_EMAIL` at the same time.
+`eiaawsolutions.com` and `gmail.com`. Narrow it to the firm's own domain once
+their partners are onboarded, and clear `BOOTSTRAP_ADMIN_EMAIL` at the same time
+so the boot-time grant stops running.
 
-### Still outstanding, lower priority
+### When someone is locked out
+
+| Situation                      | What to do                                                                                                               |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| Eight wrong passwords          | Locks for 15 minutes. Admin → Users → **Unlock** lifts it early                                                          |
+| Forgotten password             | They use **Forgotten your password** themselves                                                                          |
+| Lost phone, has recovery codes | Sign in, then _Use a recovery code_ on the second step                                                                   |
+| Lost phone, no codes left      | Admin → Users → **Reset 2FA**, after confirming who they are by another channel. This is a real privilege and is audited |
+| Leaver                         | Admin → Users → **Suspend**. Live sessions end on their next request                                                     |
+
+Suspending, changing a role, resetting a password and clearing 2FA all revoke
+live sessions immediately.
+
+### Security properties worth knowing
+
+- Passwords are scrypt-hashed at N=2^17, above the OWASP minimum
+- An unknown address and a wrong password are indistinguishable, in wording and
+  in response time
+- A password reset does **not** clear the second factor, so mailbox access alone
+  is not enough to take an account over
+- Reset tokens are stored only as hashes, expire in 45 minutes, work once, and a
+  newer request cancels an older one
+- A TOTP code cannot be replayed inside its own 30-second window
+
+### Optional: SSO alongside passwords
+
+Google Workspace and Microsoft Entra remain supported. Configure
+`AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET` in Infisical and point the Railway
+handles at them; the buttons then appear alongside the password form. Redirect
+URI: `https://web-production-782ae5.up.railway.app/api/auth/callback/google`.
+
+### Still outstanding
 
 - **Dedicated R2 bucket.** The firm currently shares `eiaaw-smt-prod` under a
-  `chambersofkoon/` prefix because the available token is scoped to it. A
-  dedicated bucket is a prefix copy away and is the right end state for
-  privileged client material.
+  `chambersofkoon/` prefix because the available token is scoped to it.
 - **Dedicated `FIELD_ENCRYPTION_KEY`.** Derived from `AUTH_SECRET` via HKDF
   until one exists, which couples rotation. Add one before rotating
-  `AUTH_SECRET`; nothing is encrypted yet, so doing it now is free.
+  `AUTH_SECRET`.
 - **Turnstile** is off and has no site key registered.
 - **Firm precedent templates** are needed before document generation is useful.
 
