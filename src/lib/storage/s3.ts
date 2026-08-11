@@ -149,7 +149,14 @@ export async function storageHealthCheck(): Promise<{
     await s3.send(new HeadBucketCommand({ Bucket: bucket() }));
     return { ok: true, latencyMs: Date.now() - started };
   } catch (error) {
-    return { ok: false, latencyMs: Date.now() - started, note: (error as Error).name };
+    const message = (error as Error).message;
+    // Distinguish "credentials are still secret:// handles" from a genuine
+    // storage outage. An operator reading a bare "Error" cannot tell which,
+    // and the two need completely different responses.
+    const note = /Missing secret|cannot be resolved/i.test(message)
+      ? 'credentials unresolved (Infisical resolver off?)'
+      : (error as Error).name;
+    return { ok: false, latencyMs: Date.now() - started, note };
   }
 }
 
