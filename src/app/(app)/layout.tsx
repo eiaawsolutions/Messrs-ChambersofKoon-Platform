@@ -57,12 +57,12 @@ export default async function AppLayout({ children }: { children: React.ReactNod
           </nav>
 
           <div className="flex flex-none items-center gap-3">
-            <div className="hidden text-right sm:block">
-              <p className="text-ink text-sm leading-tight">{actor.fullName}</p>
-              <p className="text-ink-faint text-xs leading-tight">
+            <Link href="/account" className="hidden text-right sm:block">
+              <span className="text-ink block text-sm leading-tight">{actor.fullName}</span>
+              <span className="text-ink-faint block text-xs leading-tight">
                 {actor.roleName} · {actor.office}
-              </p>
-            </div>
+              </span>
+            </Link>
             <form
               action={async () => {
                 'use server';

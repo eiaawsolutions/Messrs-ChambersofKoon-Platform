@@ -1,4 +1,5 @@
 import NextAuth, { type NextAuthConfig, type Session } from 'next-auth';
+import Credentials from 'next-auth/providers/credentials';
 import Google from 'next-auth/providers/google';
 import MicrosoftEntraID from 'next-auth/providers/microsoft-entra-id';
 import { eq, sql } from 'drizzle-orm';
@@ -8,6 +9,7 @@ import { allowedEmailDomains, config, optionalSecret, secret } from '@/lib/confi
 import { audit, AUDIT_ACTIONS } from '@/lib/audit/log';
 import { ROLE_NAMES } from '@/lib/auth/permissions';
 import { enforceMfa, isDomainAllowed } from '@/lib/auth/policy';
+import { readChallenge } from '@/lib/auth/credentials';
 
 /**
  * Authentication (M1, FR-1.1 – FR-1.4).
@@ -43,6 +45,50 @@ export function googleHostedDomain(): string | null {
 
 async function buildProviders(): Promise<NextAuthConfig['providers']> {
   const providers: NextAuthConfig['providers'] = [];
+
+  /**
+   * Local credentials (PRD amendment A1) — the firm's primary sign-in.
+   *
+   * `authorize` never sees a password. Both factors are checked by the
+   * sign-in server actions, which then hand over a short-lived signed
+   * challenge; this only verifies that signature. Keeping the factor checks
+   * out of `authorize` is what allows the two-step UI without ever holding a
+   * half-authenticated session.
+   */
+  providers.push(
+    Credentials({
+      id: 'credentials',
+      name: 'Firm account',
+      credentials: {
+        challenge: { label: 'challenge', type: 'text' },
+      },
+      async authorize(raw) {
+        const token = typeof raw?.challenge === 'string' ? raw.challenge : '';
+        if (!token) return null;
+
+        // Only a challenge minted after both factors succeeded is accepted.
+        const payload = await readChallenge(token, 'session');
+        if (!payload) return null;
+
+        const [user] = await db
+          .select({
+            id: users.id,
+            email: users.email,
+            fullName: users.fullName,
+            status: users.status,
+          })
+          .from(users)
+          .where(eq(users.id, payload.userId))
+          .limit(1);
+
+        if (!user || user.status !== 'active') return null;
+
+        await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, user.id));
+
+        return { id: user.id, email: user.email, name: user.fullName };
+      },
+    }),
+  );
 
   const googleId = await optionalSecret('AUTH_GOOGLE_ID');
   const googleSecret = await optionalSecret('AUTH_GOOGLE_SECRET');

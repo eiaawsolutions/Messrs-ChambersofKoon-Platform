@@ -152,6 +152,25 @@ export const users = pgTable(
     ssoProvider: varchar('sso_provider', { length: 40 }),
     ssoSubject: varchar('sso_subject', { length: 255 }),
     lastLoginAt: timestamp('last_login_at', { withTimezone: true }),
+
+    // --- Local credentials (PRD amendment A1) ---------------------------
+    /** scrypt hash. Null for an account that has never had a password set. */
+    passwordHash: text('password_hash'),
+    passwordUpdatedAt: timestamp('password_updated_at', { withTimezone: true }),
+    /** Set when an admin issues a temporary password; forces a change at sign-in. */
+    mustChangePassword: boolean('must_change_password').notNull().default(false),
+
+    // --- Brute-force resistance -----------------------------------------
+    failedLoginAttempts: integer('failed_login_attempts').notNull().default(0),
+    lockedUntil: timestamp('locked_until', { withTimezone: true }),
+
+    // --- TOTP second factor ---------------------------------------------
+    /** AES-256-GCM at the application layer — this is a credential, not config. */
+    totpSecretEncrypted: text('totp_secret_encrypted'),
+    /** Null until the user has proved they can produce a code. */
+    totpEnrolledAt: timestamp('totp_enrolled_at', { withTimezone: true }),
+    /** Highest accepted time step. Stops a code being replayed within its period. */
+    totpLastStep: integer('totp_last_step'),
     /** Bumped on suspend / 2FA reset so live sessions die on next request (AT-07). */
     sessionEpoch: integer('session_epoch').notNull().default(0),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -178,6 +197,57 @@ export const userDevices = pgTable(
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
   },
   (t) => [unique('user_devices_user_fp_uq').on(t.userId, t.fingerprintHash)],
+);
+
+/**
+ * Password reset tokens (PRD amendment A1).
+ *
+ * The token itself is never stored — only its SHA-256 hash — so a database
+ * disclosure does not hand out working reset links. Single-use, short-lived,
+ * and invalidated wholesale whenever the password changes by any route.
+ */
+export const passwordResetTokens = pgTable(
+  'password_reset_tokens',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    tokenHash: varchar('token_hash', { length: 64 }).notNull().unique(),
+    expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    requestedIp: varchar('requested_ip', { length: 64 }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('password_reset_tokens_user_idx').on(t.userId),
+    index('password_reset_tokens_expiry_idx').on(t.expiresAt),
+  ],
+);
+
+/**
+ * Single-use recovery codes.
+ *
+ * Without these, a lost or wiped phone means an administrator must reset the
+ * second factor for every affected person — and in a three-office firm that is
+ * exactly when someone decides 2FA is more trouble than it is worth. Stored as
+ * hashes for the same reason as reset tokens.
+ */
+export const recoveryCodes = pgTable(
+  'recovery_codes',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    codeHash: varchar('code_hash', { length: 64 }).notNull(),
+    usedAt: timestamp('used_at', { withTimezone: true }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('recovery_codes_user_idx').on(t.userId),
+    unique('recovery_codes_user_hash_uq').on(t.userId, t.codeHash),
+  ],
 );
 
 /**
@@ -897,5 +967,7 @@ export type ProcedureStage = typeof procedureStages.$inferSelect;
 export type AvailabilityRule = typeof availabilityRules.$inferSelect;
 export type ExceptionTask = typeof exceptionTasks.$inferSelect;
 export type AuditEvent = typeof auditEvents.$inferSelect;
+export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
+export type RecoveryCode = typeof recoveryCodes.$inferSelect;
 export type Office = (typeof officeEnum.enumValues)[number];
 export type PracticeArea = (typeof practiceAreaEnum.enumValues)[number];

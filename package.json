@@ -2,7 +2,7 @@
   "name": "matter-velocity-platform",
   "version": "1.0.0",
   "private": true,
-  "description": "Matter Velocity Platform \u2014 Messrs Chambers of Koon. Single-tenant legal operations platform by EIAAW Solutions Sdn Bhd.",
+  "description": "Matter Velocity Platform — Messrs Chambers of Koon. Single-tenant legal operations platform by EIAAW Solutions Sdn Bhd.",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -44,6 +44,7 @@
     "pg": "^8.23.0",
     "pg-boss": "^12.27.0",
     "pizzip": "^3.2.0",
+    "qrcode": "^1.5.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
     "server-only": "^0.0.1",
@@ -56,6 +57,7 @@
     "@tailwindcss/postcss": "^4.3.3",
     "@types/node": "^26.2.0",
     "@types/pg": "^8.21.0",
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@vitest/coverage-v8": "^4.1.10",

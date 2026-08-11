@@ -6,18 +6,19 @@ import { audit, AUDIT_ACTIONS } from '@/lib/audit/log';
 import { allowedEmailDomains } from '@/lib/config/env';
 import { isDomainAllowed } from '@/lib/auth/policy';
 import { ROLE_NAMES } from '@/lib/auth/permissions';
+import { generateTemporaryPassword, hashPassword } from '@/lib/auth/password';
 
 /**
  * Grant Managing Partner to an email address.
  *
  *   npm run grant:admin -- someone@example.com
  *
- * Why this exists: there is no password store and therefore no way to "create"
- * a user with a credential. Identity comes entirely from the OIDC provider.
- * What this does is pre-authorise an address — the row is created in `active`
- * state with the Managing Partner role, so the first time that person completes
- * SSO they land straight in with full access, instead of arriving as `invited`
- * and needing someone else to approve them.
+ * Creates (or promotes) the account as an active Managing Partner and issues a
+ * temporary password, printed once. The holder must change it at first sign-in
+ * and then enrol an authenticator app before the account is usable.
+ *
+ * Used for the very first administrator, when there is nobody in the system yet
+ * to create accounts through the admin console.
  *
  * It refuses an address outside ALLOWED_EMAIL_DOMAINS, because a pre-authorised
  * row for an address that can never sign in is just a misleading artefact.
@@ -58,12 +59,20 @@ async function main(): Promise<void> {
     .where(sql`lower(${users.email}) = ${email}`)
     .limit(1);
 
+  const temporaryPassword = generateTemporaryPassword();
+  const passwordHash = await hashPassword(temporaryPassword);
+
   if (existing) {
     await db
       .update(users)
       .set({
         roleId: role.id,
         status: 'active',
+        passwordHash,
+        passwordUpdatedAt: new Date(),
+        mustChangePassword: true,
+        failedLoginAttempts: 0,
+        lockedUntil: null,
         // Any live session must re-read the new grants on its next request.
         sessionEpoch: sql`${users.sessionEpoch} + 1`,
       })
@@ -87,6 +96,9 @@ async function main(): Promise<void> {
         roleId: role.id,
         office: 'KL',
         status: 'active',
+        passwordHash,
+        passwordUpdatedAt: new Date(),
+        mustChangePassword: true,
       })
       .returning({ id: users.id });
 

@@ -6,6 +6,7 @@ import {
   featureFlags,
   messageTemplates,
   permissions as permissionsTable,
+  recoveryCodes,
   rolePermissions,
   roles,
   users,
@@ -16,6 +17,9 @@ import { audit, AUDIT_ACTIONS } from '@/lib/audit/log';
 import { revokeSessions } from '@/lib/auth/session';
 import { invalidateTemplateCache } from '@/lib/comms/templates';
 import { SCOPES, type Scope } from '@/lib/auth/permissions';
+import { generateTemporaryPassword, hashPassword } from '@/lib/auth/password';
+import { allowedEmailDomains } from '@/lib/config/env';
+import { isDomainAllowed } from '@/lib/auth/policy';
 import type { Actor } from '@/lib/auth/guard';
 
 /**
@@ -43,6 +47,10 @@ export async function listUsers() {
       roleId: users.roleId,
       roleName: roles.name,
       lastLoginAt: users.lastLoginAt,
+      lockedUntil: users.lockedUntil,
+      failedLoginAttempts: users.failedLoginAttempts,
+      totpEnrolledAt: users.totpEnrolledAt,
+      mustChangePassword: users.mustChangePassword,
     })
     .from(users)
     .innerJoin(roles, eq(roles.id, users.roleId))
@@ -423,5 +431,162 @@ export async function updateMessageTemplate(params: {
     actorEmail: params.actor.email,
     entityType: 'message_template',
     metadata: { key: params.key, isActive: params.isActive },
+  });
+}
+
+// ---------------------------------------------------------------------------
+// User creation with local credentials (PRD amendment A1)
+// ---------------------------------------------------------------------------
+
+export interface CreatedUserResult {
+  userId: string;
+  temporaryPassword: string;
+}
+
+/**
+ * Create a user and issue a temporary password (FR-1.6).
+ *
+ * The temporary password is returned to the administrator **once** so they can
+ * hand it over in person or by phone. It is not emailed: sending a working
+ * credential to a mailbox the firm has not yet verified is how accounts get
+ * taken over before their owner has ever signed in.
+ *
+ * `mustChangePassword` forces a change at first sign-in, and second-factor
+ * enrolment follows immediately after, so the temporary password is only ever
+ * good for one supervised login.
+ */
+export async function createUserWithTemporaryPassword(params: {
+  actor: Actor;
+  email: string;
+  fullName: string;
+  roleId: string;
+  office: Office;
+}): Promise<CreatedUserResult> {
+  const email = params.email.trim().toLowerCase();
+
+  const domains = allowedEmailDomains();
+  if (!isDomainAllowed(email, domains)) {
+    throw new AdminGuardError(
+      `${email} is not on the allow-list (${domains.join(', ')}), so it could never sign in.`,
+    );
+  }
+
+  const [existing] = await db
+    .select({ id: users.id })
+    .from(users)
+    .where(sql`lower(${users.email}) = ${email}`)
+    .limit(1);
+  if (existing) throw new AdminGuardError('An account with that email already exists.');
+
+  const temporaryPassword = generateTemporaryPassword();
+
+  const [created] = await db
+    .insert(users)
+    .values({
+      email,
+      fullName: params.fullName.trim(),
+      roleId: params.roleId,
+      office: params.office,
+      status: 'active',
+      passwordHash: await hashPassword(temporaryPassword),
+      passwordUpdatedAt: new Date(),
+      mustChangePassword: true,
+    })
+    .returning({ id: users.id });
+
+  if (!created) throw new AdminGuardError('Could not create the account.');
+
+  await audit({
+    action: AUDIT_ACTIONS.USER_CREATE,
+    actorUserId: params.actor.id,
+    actorEmail: params.actor.email,
+    entityType: 'user',
+    entityId: created.id,
+    metadata: {
+      email,
+      roleId: params.roleId,
+      office: params.office,
+      temporaryPasswordIssued: true,
+    },
+  });
+
+  return { userId: created.id, temporaryPassword };
+}
+
+/** Issue a fresh temporary password for an existing account (FR-1.6). */
+export async function resetUserPassword(params: { actor: Actor; userId: string }): Promise<string> {
+  const temporaryPassword = generateTemporaryPassword();
+
+  await db
+    .update(users)
+    .set({
+      passwordHash: await hashPassword(temporaryPassword),
+      passwordUpdatedAt: new Date(),
+      mustChangePassword: true,
+      failedLoginAttempts: 0,
+      lockedUntil: null,
+      sessionEpoch: sql`${users.sessionEpoch} + 1`,
+    })
+    .where(eq(users.id, params.userId));
+
+  await audit({
+    action: AUDIT_ACTIONS.USER_UPDATE,
+    actorUserId: params.actor.id,
+    actorEmail: params.actor.email,
+    entityType: 'user',
+    entityId: params.userId,
+    metadata: { temporaryPasswordIssued: true, sessionsRevoked: true },
+  });
+
+  return temporaryPassword;
+}
+
+/**
+ * Clear the second factor so the person can enrol a new device (FR-1.6).
+ *
+ * Used when a phone is lost and the recovery codes are gone too. It is a real
+ * privilege: whoever holds the password can then complete sign-in on a device
+ * of their choosing, so it is audited and revokes live sessions.
+ */
+export async function resetTwoFactorEnrolment(params: {
+  actor: Actor;
+  userId: string;
+}): Promise<void> {
+  await db
+    .update(users)
+    .set({
+      totpSecretEncrypted: null,
+      totpEnrolledAt: null,
+      totpLastStep: null,
+      sessionEpoch: sql`${users.sessionEpoch} + 1`,
+    })
+    .where(eq(users.id, params.userId));
+
+  await db.delete(recoveryCodes).where(eq(recoveryCodes.userId, params.userId));
+
+  await audit({
+    action: AUDIT_ACTIONS.USER_2FA_RESET,
+    actorUserId: params.actor.id,
+    actorEmail: params.actor.email,
+    entityType: 'user',
+    entityId: params.userId,
+    metadata: { twoFactorCleared: true, recoveryCodesRevoked: true, sessionsRevoked: true },
+  });
+}
+
+/** Lift a lockout early, after identifying the person by another channel. */
+export async function unlockUser(params: { actor: Actor; userId: string }): Promise<void> {
+  await db
+    .update(users)
+    .set({ failedLoginAttempts: 0, lockedUntil: null })
+    .where(eq(users.id, params.userId));
+
+  await audit({
+    action: AUDIT_ACTIONS.USER_UPDATE,
+    actorUserId: params.actor.id,
+    actorEmail: params.actor.email,
+    entityType: 'user',
+    entityId: params.userId,
+    metadata: { unlocked: true },
   });
 }

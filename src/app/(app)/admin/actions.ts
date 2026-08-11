@@ -1,6 +1,7 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
+import { redirect } from 'next/navigation';
 import { z } from 'zod';
 import { requireActor } from '@/lib/auth/session';
 import { assertCan } from '@/lib/auth/guard';
@@ -8,6 +9,10 @@ import { PERMISSIONS, SCOPES, type Scope } from '@/lib/auth/permissions';
 import {
   createAvailabilityRule,
   createRole,
+  createUserWithTemporaryPassword,
+  resetTwoFactorEnrolment,
+  resetUserPassword,
+  unlockUser,
   deleteAvailabilityRule,
   deleteRole,
   resetTwoFactor,
@@ -220,4 +225,87 @@ export async function updateTemplateAction(formData: FormData): Promise<void> {
 
   await updateMessageTemplate({ actor, ...parsed, isActive });
   revalidatePath('/admin/templates');
+}
+
+// ---------------------------------------------------------------------------
+// Local credential administration (PRD amendment A1)
+// ---------------------------------------------------------------------------
+
+const createUserSchema = z.object({
+  email: z.string().email().max(320),
+  fullName: z.string().min(2).max(200),
+  roleId: z.string().uuid(),
+  office: z.enum(OFFICES),
+});
+
+/**
+ * Create an account and return its temporary password once, in the redirect.
+ *
+ * The password travels in the URL of a single redirect back to the admin
+ * screen rather than by email, because emailing a working credential to an
+ * address the firm has not yet verified is the classic account-takeover path.
+ * The administrator reads it to the person directly.
+ */
+export async function createUserAction(formData: FormData): Promise<void> {
+  const parsed = createUserSchema.parse({
+    email: formData.get('email'),
+    fullName: formData.get('fullName'),
+    roleId: formData.get('roleId'),
+    office: formData.get('office'),
+  });
+
+  const actor = await requireActor();
+  assertCan(actor, PERMISSIONS.ADMIN_USERS_MANAGE);
+
+  const result = await createUserWithTemporaryPassword({ actor, ...parsed });
+
+  revalidatePath('/admin/users');
+  redirect(
+    `/admin/users?created=${encodeURIComponent(parsed.email)}` +
+      `&temp=${encodeURIComponent(result.temporaryPassword)}`,
+  );
+}
+
+export async function resetUserPasswordAction(formData: FormData): Promise<void> {
+  const userId = z.string().uuid().parse(formData.get('userId'));
+  const actor = await requireActor();
+  if (
+    !actor.grants[PERMISSIONS.ADMIN_USERS_MANAGE] &&
+    !actor.grants[PERMISSIONS.ADMIN_USERS_ONBOARD]
+  ) {
+    assertCan(actor, PERMISSIONS.ADMIN_USERS_MANAGE);
+  }
+
+  const temporaryPassword = await resetUserPassword({ actor, userId });
+
+  revalidatePath('/admin/users');
+  redirect(`/admin/users?reset=1&temp=${encodeURIComponent(temporaryPassword)}`);
+}
+
+export async function resetTwoFactorEnrolmentAction(formData: FormData): Promise<void> {
+  const userId = z.string().uuid().parse(formData.get('userId'));
+  const actor = await requireActor();
+  if (
+    !actor.grants[PERMISSIONS.ADMIN_USERS_MANAGE] &&
+    !actor.grants[PERMISSIONS.ADMIN_USERS_ONBOARD]
+  ) {
+    assertCan(actor, PERMISSIONS.ADMIN_USERS_MANAGE);
+  }
+
+  await resetTwoFactorEnrolment({ actor, userId });
+  revalidatePath('/admin/users');
+}
+
+export async function unlockUserAction(formData: FormData): Promise<void> {
+  const userId = z.string().uuid().parse(formData.get('userId'));
+  const actor = await requireActor();
+  if (
+    !actor.grants[PERMISSIONS.ADMIN_USERS_MANAGE] &&
+    !actor.grants[PERMISSIONS.ADMIN_USERS_ONBOARD]
+  ) {
+    assertCan(actor, PERMISSIONS.ADMIN_USERS_MANAGE);
+  }
+
+  await unlockUser({ actor, userId });
+  revalidatePath('/admin/users');
 }
