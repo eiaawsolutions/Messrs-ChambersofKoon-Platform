@@ -90,7 +90,9 @@ export function storageKey(parts: {
     .replace(/_{2,}/g, '_')
     .slice(-120);
   const scope = parts.matterId ?? 'unassigned';
-  return `${parts.kind}/${scope}/${parts.id}/${safeName}`;
+  const prefix = config().STORAGE_PREFIX;
+  const base = `${parts.kind}/${scope}/${parts.id}/${safeName}`;
+  return prefix ? `${prefix}/${base}` : base;
 }
 
 export async function putObject(params: {

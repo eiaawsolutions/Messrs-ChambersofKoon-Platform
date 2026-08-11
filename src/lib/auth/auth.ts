@@ -24,6 +24,23 @@ import { enforceMfa, isDomainAllowed } from '@/lib/auth/policy';
  * the token's epoch against the database on every server request (AT-07).
  */
 
+/** Public providers that can never be a Workspace `hd` value. */
+const PUBLIC_EMAIL_DOMAINS = new Set([
+  'gmail.com',
+  'googlemail.com',
+  'outlook.com',
+  'hotmail.com',
+  'yahoo.com',
+  'icloud.com',
+]);
+
+export function googleHostedDomain(): string | null {
+  const domains = allowedEmailDomains();
+  if (domains.length !== 1) return null;
+  const only = domains[0]!;
+  return PUBLIC_EMAIL_DOMAINS.has(only) ? null : only;
+}
+
 async function buildProviders(): Promise<NextAuthConfig['providers']> {
   const providers: NextAuthConfig['providers'] = [];
 
@@ -36,8 +53,17 @@ async function buildProviders(): Promise<NextAuthConfig['providers']> {
         clientSecret: googleSecret,
         authorization: {
           params: {
-            // Restrict the account chooser to the firm's tenant where possible.
-            hd: allowedEmailDomains()[0],
+            /**
+             * `hd` restricts the Google account chooser to a single Workspace
+             * domain. It is a convenience, not a control — the real gate is the
+             * server-side allow-list check in the signIn callback.
+             *
+             * It is only sent when exactly one domain is allow-listed and that
+             * domain is a Workspace domain. Sending it while a public provider
+             * (gmail.com) or a second domain is allow-listed would lock out
+             * accounts the firm has deliberately permitted.
+             */
+            ...(googleHostedDomain() ? { hd: googleHostedDomain()! } : {}),
             prompt: 'select_account',
           },
         },

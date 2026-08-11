@@ -41,6 +41,16 @@ const nonSecretSchema = z.object({
   STORAGE_ENDPOINT: z.string().optional(),
   STORAGE_REGION: z.string().default('auto'),
   STORAGE_BUCKET: z.string().default('chambersofkoon-matters'),
+  /**
+   * Top-level key prefix inside the bucket.
+   *
+   * The firm currently shares an R2 bucket with other EIAAW products because
+   * the available R2 token is scoped to it. Namespacing every object under one
+   * prefix keeps this firm's matter files identifiable and makes a later move
+   * to a dedicated bucket a single prefix copy rather than an audit of every
+   * key. Set to '' if the bucket is dedicated.
+   */
+  STORAGE_PREFIX: z.string().default('chambersofkoon'),
 
   ALLOWED_EMAIL_DOMAINS: z.string().default('chambersofkoon.com.my'),
   SESSION_MAX_AGE_SECONDS: z.coerce.number().int().positive().default(43_200),

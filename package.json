@@ -2,7 +2,7 @@
   "name": "matter-velocity-platform",
   "version": "1.0.0",
   "private": true,
-  "description": "Matter Velocity Platform — Messrs Chambers of Koon. Single-tenant legal operations platform by EIAAW Solutions Sdn Bhd.",
+  "description": "Matter Velocity Platform \u2014 Messrs Chambers of Koon. Single-tenant legal operations platform by EIAAW Solutions Sdn Bhd.",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -23,9 +23,10 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --conditions=react-server src/lib/db/migrate.ts",
     "db:seed": "tsx --conditions=react-server src/lib/db/seed.ts",
+    "grant:admin": "tsx --conditions=react-server scripts/grant-admin.ts",
     "db:studio": "drizzle-kit studio",
     "widget:build": "tsx scripts/build-widget.ts",
-    "release": "npm run db:migrate && npm run db:seed && npm run start",
+    "release": "node scripts/start.mjs",
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test",
     "prepare": "lefthook install || true"
   },

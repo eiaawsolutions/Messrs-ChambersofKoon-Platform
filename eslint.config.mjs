@@ -54,10 +54,12 @@ export default [
   {
     // The permission layer, services, job workers and scripts are the
     // sanctioned direct-DB callers.
+    // Server modules, job workers and CLI scripts log to stdout by design —
+    // that output is the operator's only view of a background process.
     files: [
       'src/lib/**/*.ts',
       'src/jobs/**/*.ts',
-      'scripts/**/*.ts',
+      'scripts/**/*.{ts,mjs,js}',
       'evals/**/*.ts',
       'tests/**/*.ts',
       '**/*.test.ts',
