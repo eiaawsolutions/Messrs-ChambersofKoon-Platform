@@ -178,7 +178,9 @@ export interface ExtractedContact {
  * stores the real values; the model only ever sees the placeholder.
  */
 export function extractContactDetails(text: string): ExtractedContact {
-  const email = text.match(/[\w.+-]+@[\w-]+\.[\w.-]+/)?.[0] ?? null;
-  const phone = text.match(/(?:\+?60|0)1\d[-\s]?\d{3,4}[-\s]?\d{4}/)?.[0] ?? null;
+  // Each domain label is matched separately so a sentence-ending full stop
+  // ("…@example.com.") is not swallowed into the address.
+  const email = text.match(/[\w.+-]+@[\w-]+(?:\.[\w-]+)+/)?.[0] ?? null;
+  const phone = text.match(/(?:\+?60|0)\s?1\d[-\s]?\d{3,4}[-\s]?\d{4}/)?.[0] ?? null;
   return { email, phone: phone ? phone.replace(/\s+/g, ' ').trim() : null };
 }
