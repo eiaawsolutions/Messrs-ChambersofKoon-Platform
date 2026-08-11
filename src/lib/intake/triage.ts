@@ -5,7 +5,7 @@ import { enquiries, enquiryMessages } from '@/lib/db/schema';
 import { generateStructured, generateText, AiSchemaError } from '@/lib/ai/client';
 import { INTAKE_SYSTEM, INTAKE_BRIEF_SYSTEM, wrapUntrusted } from '@/lib/ai/prompts';
 import { caseBriefJsonSchema, caseBriefSchema, type CaseBrief } from '@/lib/ai/schemas';
-import { scrubFreeText } from '@/lib/ai/tokenise';
+import { extractContactDetails, scrubFreeText } from '@/lib/ai/tokenise';
 import { audit, AUDIT_ACTIONS } from '@/lib/audit/log';
 
 /**
@@ -39,11 +39,15 @@ export interface TurnResult {
   readyForBrief: boolean;
 }
 
-function looksComplete(reply: string, turnCount: number): boolean {
-  // The prompt tells the agent to say so and stop asking. Trailing questions
-  // are the reliable signal that it has not finished.
+/** After this many exchanges, brief regardless — an endless intake helps nobody. */
+const FORCE_BRIEF_AFTER_EXCHANGES = 6;
+
+function looksComplete(reply: string, exchanges: number): boolean {
+  // The prompt tells the agent to say so and stop asking, so a trailing
+  // question is the reliable signal it has not finished.
   const asksAQuestion = /\?\s*$/.test(reply.trim());
-  return !asksAQuestion && turnCount >= 3;
+  if (exchanges >= FORCE_BRIEF_AFTER_EXCHANGES) return true;
+  return !asksAQuestion && exchanges >= 3;
 }
 
 /** One conversational turn. Persists both sides of the exchange. */
@@ -65,6 +69,17 @@ export async function respondToTurn(params: {
       turnCount: history.length,
       readyForBrief: true,
     };
+  }
+
+  // Capture contact details from the raw message before the scrub destroys
+  // them, then store them on the enquiry. The model only ever sees the
+  // placeholder (AI-1); the firm keeps the real value.
+  const contact = extractContactDetails(params.userMessage);
+  if (contact.email || contact.phone) {
+    const patch: Record<string, string> = {};
+    if (contact.email) patch.contactEmail = contact.email;
+    if (contact.phone) patch.contactPhone = contact.phone;
+    await db.update(enquiries).set(patch).where(eq(enquiries.id, params.enquiryId));
   }
 
   const cleaned = scrubFreeText(params.userMessage).slice(0, 4000);

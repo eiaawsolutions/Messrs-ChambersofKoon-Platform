@@ -162,3 +162,23 @@ export function vaultForMatter(input: {
   }
   return vault;
 }
+
+export interface ExtractedContact {
+  email: string | null;
+  phone: string | null;
+}
+
+/**
+ * Pull contact details out of free text *before* it is scrubbed.
+ *
+ * The scrub replaces an email or phone number with `[EMAIL]` / `[PHONE]` so it
+ * never reaches the model (AI-1). Without capturing them first, the details
+ * would be destroyed — and the agent, seeing only placeholders, would keep
+ * asking the person to repeat information they had already given. The platform
+ * stores the real values; the model only ever sees the placeholder.
+ */
+export function extractContactDetails(text: string): ExtractedContact {
+  const email = text.match(/[\w.+-]+@[\w-]+\.[\w.-]+/)?.[0] ?? null;
+  const phone = text.match(/(?:\+?60|0)1\d[-\s]?\d{3,4}[-\s]?\d{4}/)?.[0] ?? null;
+  return { email, phone: phone ? phone.replace(/\s+/g, ' ').trim() : null };
+}
