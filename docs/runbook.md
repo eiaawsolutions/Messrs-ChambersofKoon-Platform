@@ -33,82 +33,107 @@ Point the external uptime monitor at `/api/health` and alert on 503 or on `statu
 
 ## 2. Finishing production setup
 
-The application is deployed and running. It is **fail-closed**: no one can sign in and no AI feature works until the secrets below exist. That is deliberate — the alternative is a system that looks live but silently cannot do its job.
+Infisical **is wired and resolving**. The app authenticates to the shared
+`eiaaw-all-projects` vault (env `prod`) with the bootstrap machine identity, and
+`/api/health` confirms `secrets: ok` and `anthropic: ok`.
 
-### Step 1 — Create the Infisical workspace
+Handles are mapped to the names the vault actually holds:
 
-In the Infisical UI (**Claude does not create secrets — this is a human step, by design**):
+| App variable                | Infisical secret                | Status    |
+| --------------------------- | ------------------------------- | --------- |
+| `ANTHROPIC_API_KEY`         | `ANTHROPIC_API_KEY`             | resolving |
+| `EMBEDDING_API_KEY`         | `VOYAGE_API_KEY`                | resolving |
+| `RESEND_API_KEY`            | `RESEND_API`                    | resolving |
+| `RESEND_WEBHOOK_SECRET`     | `RESEND_WEBHOOK_SIGNING_SECRET` | resolving |
+| `AUTH_SECRET`               | `SESSION_SECRET`                | resolving |
+| `STORAGE_ACCESS_KEY_ID`     | `R2_ACCESS_KEY_ID`              | resolving |
+| `STORAGE_SECRET_ACCESS_KEY` | `R2_SECRET_ACCESS_KEY`          | resolving |
+| `STORAGE_ACCOUNT_ID`        | `R2_ACCOUNT_ID`                 | resolving |
 
-1. Create project `chambersofkoon-prod` with environments `dev`, `staging`, `prod`.
-2. Create machine identity `chambersofkoon-app` with `secrets:read`, scoped to that workspace only.
-3. Populate `prod`:
+Three things remain, and none of them can be borrowed from another project.
 
-| Secret                                                | Source                                           |
-| ----------------------------------------------------- | ------------------------------------------------ |
-| `ANTHROPIC_API_KEY`                                   | console.anthropic.com                            |
-| `EMBEDDING_API_KEY`                                   | Voyage AI                                        |
-| `RESEND_API_KEY`                                      | Resend                                           |
-| `RESEND_WEBHOOK_SECRET`                               | Resend webhook config (`whsec_…`)                |
-| `STORAGE_ACCESS_KEY_ID` / `STORAGE_SECRET_ACCESS_KEY` | Cloudflare R2 token                              |
-| `AUTH_SECRET`                                         | `openssl rand -base64 32`                        |
-| `AUTH_GOOGLE_ID` / `AUTH_GOOGLE_SECRET`               | Google Cloud OAuth client                        |
-| `AUTH_MICROSOFT_ID` / `_SECRET` / `_TENANT_ID`        | Entra app registration                           |
-| `FIELD_ENCRYPTION_KEY`                                | `openssl rand -base64 32` — **32 bytes exactly** |
-| `TURNSTILE_SECRET_KEY`                                | Cloudflare Turnstile                             |
-| `SENTRY_DSN`                                          | Sentry project                                   |
+### Step 1 — Register an OIDC client (blocking)
 
-The handles are already set in Railway and point at exactly these names. Nothing in Railway needs to change except step 2.
+**Nobody can sign in until this exists.** The vault has no Google Workspace or
+Microsoft Entra credentials for this application, and an OAuth client is a
+per-application registration inside the firm's own tenant.
 
-### Step 2 — Enable the resolver
+For Google Workspace: Google Cloud Console → APIs & Services → Credentials →
+Create OAuth client ID → Web application. Authorised redirect URI:
 
-```bash
-railway variables --service web \
-  --set 'INFISICAL_RESOLVER_ENABLED=true' \
-  --set 'INFISICAL_APP_CLIENT_ID=<client id>' \
-  --set 'INFISICAL_APP_CLIENT_SECRET=<client secret>' \
-  --set 'INFISICAL_PROJECT_ID=<workspace id>'
+```
+https://web-production-782ae5.up.railway.app/api/auth/callback/google
 ```
 
-These three are the **only** raw secrets permitted anywhere. If you find yourself typing `sk-ant-`, `re_` or `whsec_` into a Railway variable, stop — that is the mistake this architecture exists to prevent.
+For Microsoft 365: Entra admin centre → App registrations → New registration.
+Redirect URI as above with `/microsoft-entra-id`.
 
-### Step 3 — Storage
-
-Create the R2 bucket `chambersofkoon-matters`, private, no public access. Then:
-
-```bash
-railway variables --service web \
-  --set 'STORAGE_ENDPOINT=https://<account>.r2.cloudflarestorage.com'
-```
-
-`STORAGE_ENDPOINT` is account-scoped configuration, not a secret, so it is a literal.
-
-### Step 4 — Verify
+Add the resulting values to Infisical under `prod` as `AUTH_GOOGLE_ID`,
+`AUTH_GOOGLE_SECRET` (and/or `AUTH_MICROSOFT_ID`, `AUTH_MICROSOFT_SECRET`,
+`AUTH_MICROSOFT_TENANT_ID`), then point the Railway variables at them:
 
 ```bash
-curl -s https://<domain>/api/health | jq
+railway variables --service web   --set 'AUTH_GOOGLE_ID=secret://eiaaw-all-projects/prod/AUTH_GOOGLE_ID'   --set 'AUTH_GOOGLE_SECRET=secret://eiaaw-all-projects/prod/AUTH_GOOGLE_SECRET'
 ```
 
-All five checks should read `ok: true`. If `secrets` is true but `storage` says _credentials unresolved_, the resolver is on but that particular handle does not match a real Infisical secret.
+Confirm `ALLOWED_EMAIL_DOMAINS` is the firm's real domain before anyone signs in.
 
-### Step 5 — Identity provider
+**First sign-in matters:** the first person from an allow-listed domain to sign
+in against an empty `users` table becomes Managing Partner and is active
+immediately. Everyone after them lands in `invited` with no access. Have the
+managing partner go first, deliberately.
 
-Register the redirect URI `https://<domain>/api/auth/callback/google` (and/or `.../microsoft-entra-id`). Set `ALLOWED_EMAIL_DOMAINS` to the firm's domain.
+### Step 2 — Create a dedicated R2 bucket
 
-**First sign-in:** the first person from an allow-listed domain to sign in against an empty `users` table becomes Managing Partner and is active immediately. Everyone after them lands in `invited` and must be activated. Have the managing partner sign in first, deliberately.
+The R2 credentials in the vault authenticate correctly, but the token is scoped
+to the existing `eiaaw-smt-prod` bucket. This platform is configured for
+`chambersofkoon-matters`, which does not exist yet.
 
-### Step 6 — Worker service
+Do **not** repoint it at the shared bucket. A law firm's privileged matter files
+should not share a bucket with another product's assets; segregation is the
+whole point of a per-client bucket.
 
-The web service does not process jobs. Triage, slot proposal, milestone email, OCR and embedding all need the worker:
+1. Cloudflare dashboard → R2 → Create bucket `chambersofkoon-matters`, private.
+2. Create an R2 API token scoped to that bucket with read and write.
+3. Either add its values to Infisical as new secrets and repoint the handles, or
+   extend the existing token's scope to include the new bucket.
+
+`/api/health` will report `storage: ok` once the bucket is reachable. Until
+then, archive upload and document download are the only features affected;
+everything else runs.
+
+### Step 3 — Add a dedicated field-encryption key
+
+There is no `FIELD_ENCRYPTION_KEY` in the vault, so the app derives one from
+`AUTH_SECRET` via HKDF-SHA256 with a fixed domain-separation label. That is
+sound — the derived key is independent of the signing key — but it couples
+rotation: **while the fallback is in use, rotating `AUTH_SECRET` makes existing
+encrypted client identifiers undecryptable.**
+
+Before the first rotation:
+
+```bash
+openssl rand -base64 32     # add to Infisical as FIELD_ENCRYPTION_KEY
+railway variables --service web   --set 'FIELD_ENCRYPTION_KEY=secret://eiaaw-all-projects/prod/FIELD_ENCRYPTION_KEY'
+```
+
+Any identifiers encrypted under the derived key must be re-encrypted at the same
+time. At present there are none, so doing this early is free.
+
+### Step 4 — Worker service (required for anything to process)
+
+The web service does not run jobs. Triage, slot proposal, milestone email, text
+extraction and embedding all need the worker. Until it runs, enquiries are
+recorded but never triaged and no draft is ever generated.
 
 ```bash
 railway add --service worker --repo eiaawsolutions/Messrs-ChambersofKoon-Platform --branch main
-railway variables --service worker --set 'DATABASE_URL=${{Postgres.DATABASE_URL}}' # + the same env as web
-# start command: npm run worker
 ```
 
-Until the worker runs, enquiries are recorded but never triaged.
+Give it the same variables as `web` (including the three `INFISICAL_*` bootstrap
+credentials) and set its start command to `npm run worker`.
 
-### Step 7 — Widget embed
+### Step 5 — Widget embed
 
 On chambersofkoon.com.my:
 
@@ -121,11 +146,10 @@ On chambersofkoon.com.my:
 ></script>
 ```
 
-`WIDGET_PUBLIC_KEY` is public by design — it ships in the page source. It raises the cost of casual abuse; the origin allow-list, rate limiter and Turnstile do the real work. Add the site's origin to `WIDGET_ALLOWED_ORIGINS`.
-
-Set `TURNSTILE_ENABLED=true` before go-live.
-
----
+`WIDGET_PUBLIC_KEY` is public by design — it ships in the page source. It raises
+the cost of casual abuse; the origin allow-list, rate limiter and Turnstile do
+the real work. Add the site's origin to `WIDGET_ALLOWED_ORIGINS`, and set
+`TURNSTILE_ENABLED=true` with a registered site key before go-live.
 
 ## 3. Routine operations
 
