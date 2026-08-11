@@ -7,7 +7,7 @@ import {
   S3Client,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
-import { config, secret } from '@/lib/config/env';
+import { config, optionalSecret, secret } from '@/lib/config/env';
 
 /**
  * S3-compatible object storage (Cloudflare R2).
@@ -22,12 +22,29 @@ const PRESIGN_TTL_SECONDS = 300; // 5 minutes
 
 let clientInstance: S3Client | null = null;
 
+/**
+ * The S3 endpoint. Explicit `STORAGE_ENDPOINT` wins; otherwise it is derived
+ * from the R2 account id, which is what the shared EIAAW vault holds.
+ */
+export async function resolveEndpoint(): Promise<string | undefined> {
+  const explicit = config().STORAGE_ENDPOINT;
+  if (explicit) return explicit;
+  const accountId = await optionalSecret('STORAGE_ACCOUNT_ID');
+  return accountId ? `https://${accountId}.r2.cloudflarestorage.com` : undefined;
+}
+
 async function client(): Promise<S3Client> {
   if (clientInstance) return clientInstance;
   const cfg = config();
+  const endpoint = await resolveEndpoint();
+  if (!endpoint) {
+    throw new Error(
+      'Object storage is not configured: set STORAGE_ENDPOINT, or STORAGE_ACCOUNT_ID for R2.',
+    );
+  }
   clientInstance = new S3Client({
     region: cfg.STORAGE_REGION,
-    endpoint: cfg.STORAGE_ENDPOINT,
+    endpoint,
     forcePathStyle: true,
     credentials: {
       accessKeyId: await secret('STORAGE_ACCESS_KEY_ID'),
@@ -141,7 +158,7 @@ export async function storageHealthCheck(): Promise<{
   note?: string;
 }> {
   const started = Date.now();
-  if (!config().STORAGE_ENDPOINT) {
+  if (!(await resolveEndpoint())) {
     return { ok: false, latencyMs: 0, note: 'not configured' };
   }
   try {

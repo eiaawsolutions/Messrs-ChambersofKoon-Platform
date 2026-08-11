@@ -10,17 +10,17 @@ Built by **EIAAW Solutions Sdn Bhd** (202603133419) against the PRD _Matter Velo
 
 Four AI-assisted workflows, all under lawyer control with a full audit trail:
 
-| Milestone | Capability                                                    | Status                               |
-| --------- | ------------------------------------------------------------- | ------------------------------------ |
-| M1        | SSO, RBAC, immutable audit log                                | Implemented                          |
-| M2        | Intake widget + triage agent                                  | Implemented                          |
-| M3        | Availability, slot proposal, lawyer approval, `.ics` delivery | Implemented                          |
-| M4        | `.docx` generation from firm templates                        | Implemented (needs firm templates)   |
-| M5        | Archive ingest, OCR, chunking, embeddings                     | Implemented (see limits below)       |
-| M6        | Permission-scoped hybrid precedent retrieval                  | Implemented                          |
-| M7        | Milestone client communication + delivery webhooks            | Implemented                          |
-| M8        | Lawyer dashboard                                              | Home, intake queue, precedent search |
-| M9        | Administration                                                | Partial — see _Known gaps_           |
+| Milestone | Capability                                                    | Status                             |
+| --------- | ------------------------------------------------------------- | ---------------------------------- |
+| M1        | SSO, RBAC, immutable audit log                                | Implemented                        |
+| M2        | Intake widget + triage agent                                  | Implemented                        |
+| M3        | Availability, slot proposal, lawyer approval, `.ics` delivery | Implemented                        |
+| M4        | `.docx` generation from firm templates                        | Implemented (needs firm templates) |
+| M5        | Archive ingest, OCR, chunking, embeddings                     | Implemented (see limits below)     |
+| M6        | Permission-scoped hybrid precedent retrieval                  | Implemented                        |
+| M7        | Milestone client communication + delivery webhooks            | Implemented                        |
+| M8        | Lawyer dashboard                                              | Implemented                        |
+| M9        | Administration                                                | Implemented                        |
 
 ## Product principles (from the PRD, enforced in code)
 
@@ -116,14 +116,13 @@ Coverage is concentrated where correctness is load-bearing rather than spread ev
 
 Stated plainly so they are decisions, not surprises:
 
-1. **Infisical is not yet wired for this project.** No `chambersofkoon-prod` workspace exists, so production runs with `secret://` handles that cannot resolve. The app fails closed and reports it on `/api/health`. See the runbook for the ~30-minute setup.
-2. **Scanned PDFs are not OCR'd end-to-end.** Native-text PDFs, DOCX, images and plain text all extract. A scanned PDF with no text layer needs a rasteriser to turn pages into images, which is not in this runtime; such files are flagged `failed` with an explanatory message rather than silently indexed as empty. Options: re-upload as page images, or add a rasteriser service. The PRD anticipated this ("dedicated OCR service only if accuracy fails UAT").
-3. **Admin console is partial.** Users, roles, availability, templates and feature flags have their data model, permissions and seeds; the CRUD screens (FR-9.1–9.5) are not built. The audit log viewer and CSV export (FR-1.7) are likewise pending.
-4. **Matter view and document UI are pending.** The document generation, versioning and finalisation _services_ are complete and tested; the screens that drive them (FR-8.2, FR-4.6) are not.
-5. **Firm precedent templates are required** before M4 produces anything useful. They are a blocking discovery item in the PRD (§11).
+1. **No OIDC client is registered for this app.** The shared EIAAW vault has no Google Workspace or Microsoft Entra credentials for Matter Velocity — an OAuth client is a per-application registration in the firm's own tenant and cannot be borrowed from another project. Until one exists, nobody can sign in: `/sign-in` says so, and every protected route redirects there. This is the one blocking item.
+2. **No dedicated field-encryption key.** The vault has none, so the key is derived from `AUTH_SECRET` via HKDF-SHA256 with a fixed domain-separation label. That is cryptographically sound — the derived key is independent of the signing key — but it couples rotation: while the fallback is in use, rotating `AUTH_SECRET` makes existing encrypted client identifiers undecryptable. Add `FIELD_ENCRYPTION_KEY` to the vault before the first rotation.
+3. **Scanned PDFs are not OCR'd end-to-end.** Native-text PDFs, DOCX, images and plain text all extract. A scanned PDF with no text layer needs a rasteriser to turn pages into images, which is not in this runtime; such files are flagged `failed` with an explanatory message and a retry button, rather than silently indexed as empty. Options: re-upload as page images, or add a rasteriser service. The PRD anticipated this ("dedicated OCR service only if accuracy fails UAT").
+4. **Firm precedent templates are required** before document generation produces anything useful. They are a blocking discovery item in the PRD (§11). The template parser, placeholder mapping and assembly are built and waiting.
+5. **Turnstile is off.** `TURNSTILE_ENABLED=false` and no site key is registered. The origin allow-list and rate limiter are active. Turn it on before go-live.
 6. **`.ics` rendering has not been verified in Gmail, Outlook and Apple Mail.** The wire format is asserted by 26 tests, but AT-03 requires a human to accept an invitation in all three clients at UAT.
-
----
+7. **Client reschedule link (FR-3.8) is not built.** It is a SHOULD, not a MUST. The token column and hash are in place; the public route is not.
 
 ## Repository layout
 

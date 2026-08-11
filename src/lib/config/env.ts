@@ -67,6 +67,10 @@ export const SECRET_KEYS = [
   'RESEND_WEBHOOK_SECRET',
   'STORAGE_ACCESS_KEY_ID',
   'STORAGE_SECRET_ACCESS_KEY',
+  // Cloudflare R2 account id. The S3 endpoint is derived from it rather than
+  // configured separately, because the account id is what the shared EIAAW
+  // vault actually holds (`R2_ACCOUNT_ID`).
+  'STORAGE_ACCOUNT_ID',
   'AUTH_SECRET',
   'AUTH_GOOGLE_ID',
   'AUTH_GOOGLE_SECRET',

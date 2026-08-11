@@ -29,6 +29,8 @@ interface ResolverOptions {
   defaultEnvironment: string;
   cacheTtlSeconds: number;
   requestTimeoutMs: number;
+  /** How long to remember that a handle does not resolve. */
+  negativeCacheTtlSeconds: number;
 }
 
 export interface ParsedHandle {
@@ -72,6 +74,8 @@ export function parseHandle(handle: string): ParsedHandle {
 class InfisicalResolver {
   private readonly options: ResolverOptions;
   private readonly cache = new Map<string, CacheEntry>();
+  /** handle -> epoch ms until which a failed lookup is not retried. */
+  private readonly failures = new Map<string, number>();
   private token: { value: string; expiresAt: number } | null = null;
   private inflightLogin: Promise<string> | null = null;
 
@@ -134,6 +138,15 @@ class InfisicalResolver {
       return cached.value;
     }
 
+    // Negative cache: a handle pointing at a secret that does not exist would
+    // otherwise cost a login plus a lookup on every single request that reads
+    // it. Optional secrets (Sentry, Turnstile, an OIDC provider that is not
+    // configured yet) are exactly that case.
+    const failed = this.failures.get(handle);
+    if (failed && failed > this.now()) {
+      throw new Error(`Infisical could not resolve ${handle} (cached failure)`);
+    }
+
     const parsed = parseHandle(handle);
     const token = await this.login();
 
@@ -148,6 +161,11 @@ class InfisicalResolver {
     });
 
     if (!res.ok) {
+      // A missing secret is a lasting condition until someone adds it; a 5xx
+      // is transient. Only cache the former, and only briefly.
+      if (res.status === 404 || res.status === 400) {
+        this.failures.set(handle, this.now() + this.options.negativeCacheTtlSeconds * 1000);
+      }
       // Deliberately does not include the response body — Infisical error
       // payloads can echo secret metadata into logs.
       throw new Error(
@@ -179,6 +197,7 @@ class InfisicalResolver {
 
   clearCache(): void {
     this.cache.clear();
+    this.failures.clear();
     this.token = null;
   }
 }
@@ -210,6 +229,7 @@ function getResolver(): InfisicalResolver {
     defaultEnvironment: process.env.INFISICAL_ENVIRONMENT ?? 'prod',
     cacheTtlSeconds: Number(process.env.INFISICAL_CACHE_TTL ?? 300),
     requestTimeoutMs: Number(process.env.INFISICAL_REQUEST_TIMEOUT ?? 5000),
+    negativeCacheTtlSeconds: Number(process.env.INFISICAL_NEGATIVE_CACHE_TTL ?? 120),
   });
   return singleton;
 }

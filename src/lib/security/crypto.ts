@@ -3,10 +3,11 @@ import {
   createCipheriv,
   createDecipheriv,
   createHash,
+  hkdfSync,
   randomBytes,
   timingSafeEqual,
 } from 'node:crypto';
-import { secret } from '@/lib/config/env';
+import { optionalSecret, secret } from '@/lib/config/env';
 
 /**
  * Application-layer field encryption (NFR-1.2).
@@ -26,18 +27,59 @@ const VERSION = 'v1';
 
 let cachedKey: Buffer | null = null;
 
+/**
+ * Domain separation label. Changing this string invalidates every ciphertext
+ * derived through the fallback path, so it is fixed for the life of the
+ * deployment.
+ */
+const HKDF_INFO = 'matter-velocity/field-encryption/v1';
+
+/**
+ * The field-encryption key.
+ *
+ * Preferred: a dedicated 32-byte `FIELD_ENCRYPTION_KEY`.
+ *
+ * Fallback: derive one from `AUTH_SECRET` via HKDF-SHA256 with a fixed info
+ * label. The shared EIAAW vault has no dedicated field key, and deriving one
+ * is materially better than reusing a signing secret verbatim: HKDF with
+ * domain separation means the derived key is independent of the session
+ * signing key even though both come from the same input material.
+ *
+ * The trade-off is real and must be understood before rotating anything:
+ * while the fallback is in use, rotating AUTH_SECRET changes the derived key
+ * and makes existing encrypted identifiers undecryptable. Add a dedicated
+ * FIELD_ENCRYPTION_KEY to the vault before the first rotation.
+ */
 async function key(): Promise<Buffer> {
   if (cachedKey) return cachedKey;
-  const raw = await secret('FIELD_ENCRYPTION_KEY');
-  const buf = Buffer.from(raw, 'base64');
-  if (buf.length !== 32) {
-    throw new Error(
-      `FIELD_ENCRYPTION_KEY must decode to exactly 32 bytes (got ${buf.length}). ` +
-        'Generate with: openssl rand -base64 32',
-    );
+
+  const dedicated = await optionalSecret('FIELD_ENCRYPTION_KEY');
+  if (dedicated) {
+    const buf = Buffer.from(dedicated, 'base64');
+    if (buf.length !== 32) {
+      throw new Error(
+        `FIELD_ENCRYPTION_KEY must decode to exactly 32 bytes (got ${buf.length}). ` +
+          'Generate with: openssl rand -base64 32',
+      );
+    }
+    cachedKey = buf;
+    return cachedKey;
   }
-  cachedKey = buf;
+
+  const master = await secret('AUTH_SECRET');
+  console.warn(
+    '[crypto] No dedicated FIELD_ENCRYPTION_KEY; deriving one from AUTH_SECRET via HKDF. ' +
+      'Add FIELD_ENCRYPTION_KEY to the vault before rotating AUTH_SECRET.',
+  );
+  // Empty salt is acceptable for HKDF when the info label provides separation
+  // and the input material is a high-entropy secret.
+  cachedKey = Buffer.from(hkdfSync('sha256', master, Buffer.alloc(0), HKDF_INFO, 32));
   return cachedKey;
+}
+
+/** Test seam — the key is cached for the process lifetime. */
+export function __resetFieldKeyForTests(): void {
+  cachedKey = null;
 }
 
 export async function encryptField(plaintext: string): Promise<string> {

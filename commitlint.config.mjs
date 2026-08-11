@@ -11,6 +11,8 @@ export default {
         'audit',
         'intake',
         'widget',
+        'matters',
+        'documents',
         'schedule',
         'ics',
         'docs',
