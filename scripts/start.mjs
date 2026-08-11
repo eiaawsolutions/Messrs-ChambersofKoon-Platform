@@ -75,6 +75,27 @@ async function main() {
   console.log('[start] role=web');
   await run('npm', ['run', 'db:migrate']);
   await run('npm', ['run', 'db:seed']);
+
+  /**
+   * Optional bootstrap admin.
+   *
+   * The database is only reachable from inside Railway's network, so an
+   * operator cannot run the grant script from a laptop. Setting
+   * BOOTSTRAP_ADMIN_EMAIL pre-authorises that address as an active Managing
+   * Partner on each boot. It is idempotent — re-running promotes rather than
+   * duplicates — and it grants no credential: the person still has to complete
+   * SSO. Clear the variable once the firm's own partners are set up.
+   */
+  const bootstrapAdmin = process.env.BOOTSTRAP_ADMIN_EMAIL?.trim();
+  if (bootstrapAdmin) {
+    try {
+      await run('npm', ['run', 'grant:admin', '--', bootstrapAdmin]);
+    } catch (error) {
+      // A bad bootstrap address must not stop the platform from serving.
+      console.error(`[start] bootstrap admin failed: ${error.message}`);
+    }
+  }
+
   await run('npx', ['next', 'start']);
 }
 
