@@ -96,6 +96,18 @@ async function main() {
     }
   }
 
+  /**
+   * Demo/UAT data. Guarded by DEMO_SEED_ENABLED so it cannot run against an
+   * environment holding real client matters. Idempotent.
+   */
+  if (process.env.DEMO_SEED_ENABLED === 'true') {
+    try {
+      await run('npm', ['run', 'seed:demo']);
+    } catch (error) {
+      console.error(`[start] demo seed failed: ${error.message}`);
+    }
+  }
+
   await run('npx', ['next', 'start']);
 }
 

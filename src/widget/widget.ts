@@ -20,6 +20,12 @@ interface WidgetConfig {
   publicKey: string;
   turnstileSiteKey: string | null;
   firmName: string;
+  /**
+   * Office to route the enquiry to. Set per embed when a page belongs to one
+   * office; without it the platform routes on the triage classification alone
+   * and falls back to Kuala Lumpur.
+   */
+  office: string | null;
 }
 
 interface TurnResponse {
@@ -38,6 +44,7 @@ interface TurnResponse {
     publicKey: script.dataset.key ?? '',
     turnstileSiteKey: script.dataset.turnstile ?? null,
     firmName: script.dataset.firm ?? 'Chambers of Koon',
+    office: script.dataset.office ?? null,
   };
 
   const STORAGE_KEY = 'cok_intake_session';
@@ -316,6 +323,7 @@ interface TurnResponse {
           sessionToken: sessionToken ?? undefined,
           message,
           turnstileToken: await turnstileToken(),
+          ...(config.office ? { office: config.office } : {}),
         }),
       });
 

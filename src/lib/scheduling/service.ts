@@ -26,6 +26,7 @@ import { config, senderDomain } from '@/lib/config/env';
 import { audit, AUDIT_ACTIONS } from '@/lib/audit/log';
 import { randomToken, sha256 } from '@/lib/security/crypto';
 import { loadTemplate } from '@/lib/comms/templates';
+import { raiseException } from '@/lib/comms/milestones';
 import type { Actor } from '@/lib/auth/guard';
 
 /**
@@ -210,15 +211,35 @@ export async function proposeSlot(enquiryId: string): Promise<ProposalResult | n
     },
   });
 
-  // Internal notification only.
+  // Internal notification only — and deliberately not allowed to fail the
+  // proposal. The row is already committed above; letting a mail error
+  // propagate would make the job retry and create a *second* proposal for the
+  // same enquiry, so the lawyer would see the slot twice. The proposal is
+  // visible in the dashboard queue regardless of whether the email lands.
   if (lawyer) {
-    await notifyLawyerOfProposal({
-      to: lawyer.email,
-      slot,
-      practiceArea: enquiry.practiceArea,
-      urgency: enquiry.urgency,
-      proposalId: proposal.id,
-    });
+    try {
+      await notifyLawyerOfProposal({
+        to: lawyer.email,
+        slot,
+        practiceArea: enquiry.practiceArea,
+        urgency: enquiry.urgency,
+        proposalId: proposal.id,
+      });
+    } catch (error) {
+      console.error(
+        '[schedule] proposal %s created but the lawyer notification failed: %s',
+        proposal.id,
+        (error as Error).message,
+      );
+      await raiseException({
+        matterId: null,
+        kind: 'proposal_notification_failed',
+        title: `Consultation proposed but ${lawyer.fullName} was not emailed`,
+        detail:
+          'The proposal is in their dashboard queue and can still be accepted. ' +
+          'Check email delivery — nothing was sent to the enquirer either way.',
+      });
+    }
   }
 
   return {

@@ -30,6 +30,7 @@ export default {
         'ci',
         'design',
         'evals',
+        'demo',
         'deps',
         'security',
       ],
