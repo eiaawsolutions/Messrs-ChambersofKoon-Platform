@@ -168,21 +168,8 @@ export async function recordDevice(actor: Actor): Promise<{ isNew: boolean }> {
 }
 
 /**
- * Invalidate every live session for a user (suspend, 2FA reset).
- * Bumping the epoch is what makes an unexpirable JWT effectively revocable.
+ * Session revocation lives in a database-only module so callers that merely
+ * need to revoke do not pull the Auth.js stack in with it. Re-exported here
+ * for the existing call sites.
  */
-export async function revokeSessions(userId: string): Promise<void> {
-  await db
-    .update(users)
-    .set({ sessionEpoch: (await currentEpoch(userId)) + 1 })
-    .where(eq(users.id, userId));
-}
-
-async function currentEpoch(userId: string): Promise<number> {
-  const [row] = await db
-    .select({ epoch: users.sessionEpoch })
-    .from(users)
-    .where(eq(users.id, userId))
-    .limit(1);
-  return row?.epoch ?? 0;
-}
+export { revokeSessions } from '@/lib/auth/revoke';

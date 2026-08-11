@@ -14,7 +14,7 @@ import {
   type PracticeArea,
 } from '@/lib/db/schema';
 import { audit, AUDIT_ACTIONS } from '@/lib/audit/log';
-import { revokeSessions } from '@/lib/auth/session';
+import { revokeSessions } from '@/lib/auth/revoke';
 import { invalidateTemplateCache } from '@/lib/comms/templates';
 import { SCOPES, type Scope } from '@/lib/auth/permissions';
 import { generateTemporaryPassword, hashPassword } from '@/lib/auth/password';

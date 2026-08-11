@@ -196,29 +196,36 @@ export async function matterTimeline(actor: Actor, matterId: string) {
   const authorised = await getAuthorisedMatter(actor, matterId);
   if (!authorised) return [];
 
-  return db
-    .select({
-      id: matterStatusEvents.id,
-      stage: matterStatusEvents.stage,
-      label: procedureStages.label,
-      notes: matterStatusEvents.notes,
-      suppressed: matterStatusEvents.suppressed,
-      occurredAt: matterStatusEvents.occurredAt,
-      recordedBy: users.fullName,
-    })
-    .from(matterStatusEvents)
-    .leftJoin(users, eq(users.id, matterStatusEvents.recordedByUserId))
-    .leftJoin(
-      procedureStages,
-      and(
-        eq(procedureStages.key, matterStatusEvents.stage),
-        eq(procedureStages.practiceArea, matters.practiceArea),
-      ),
-    )
-    .innerJoin(matters, eq(matters.id, matterStatusEvents.matterId))
-    .where(eq(matterStatusEvents.matterId, matterId))
-    .orderBy(desc(matterStatusEvents.occurredAt))
-    .limit(100);
+  return (
+    db
+      .select({
+        id: matterStatusEvents.id,
+        stage: matterStatusEvents.stage,
+        label: procedureStages.label,
+        notes: matterStatusEvents.notes,
+        suppressed: matterStatusEvents.suppressed,
+        occurredAt: matterStatusEvents.occurredAt,
+        recordedBy: users.fullName,
+      })
+      .from(matterStatusEvents)
+      // `matters` must be joined before procedure_stages, because the stage join
+      // condition reads matters.practice_area. Joining it afterwards produced
+      // "missing FROM-clause entry for table matters" (42P01) and broke the
+      // whole matter page — SQL resolves joins in order, unlike the object graph
+      // this reads like.
+      .innerJoin(matters, eq(matters.id, matterStatusEvents.matterId))
+      .leftJoin(users, eq(users.id, matterStatusEvents.recordedByUserId))
+      .leftJoin(
+        procedureStages,
+        and(
+          eq(procedureStages.key, matterStatusEvents.stage),
+          eq(procedureStages.practiceArea, matters.practiceArea),
+        ),
+      )
+      .where(eq(matterStatusEvents.matterId, matterId))
+      .orderBy(desc(matterStatusEvents.occurredAt))
+      .limit(100)
+  );
 }
 
 export async function matterDocuments(actor: Actor, matterId: string) {

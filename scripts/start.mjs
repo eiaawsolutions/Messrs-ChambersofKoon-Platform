@@ -100,6 +100,16 @@ async function main() {
    * Demo/UAT data. Guarded by DEMO_SEED_ENABLED so it cannot run against an
    * environment holding real client matters. Idempotent.
    */
+  if (process.env.DEMO_RESET_ON_BOOT === 'true') {
+    // One-shot: clears rehearsal debris so a demo starts with an empty queue.
+    // Unset the variable afterwards, or every restart wipes the queue.
+    try {
+      await run('npm', ['run', 'demo:reset']);
+    } catch (error) {
+      console.error(`[start] demo reset failed: ${error.message}`);
+    }
+  }
+
   if (process.env.DEMO_SEED_ENABLED === 'true') {
     try {
       await run('npm', ['run', 'seed:demo']);
