@@ -20,7 +20,23 @@ export const runtime = 'nodejs';
  * reconnaissance surface (penetration-testing.md).
  */
 
-const CHECK_TIMEOUT_MS = 4000;
+/**
+ * Per-dependency timeouts.
+ *
+ * A single budget for everything made this endpoint flap: the database answers
+ * in tens of milliseconds over a private network, while an S3 HeadBucket is a
+ * TLS handshake plus a signed round trip to another continent and legitimately
+ * takes seconds on a cold connection. A check that alternates between ok and
+ * timeout is worse than no check, because people learn to ignore it.
+ */
+const CHECK_TIMEOUT_MS: Record<string, number> = {
+  database: 4000,
+  queue: 4000,
+  secrets: 6000,
+  storage: 10_000,
+  anthropic: 10_000,
+};
+const DEFAULT_TIMEOUT_MS = 5000;
 
 type CheckResult = { ok: boolean; latencyMs: number; note?: string };
 
@@ -29,11 +45,12 @@ async function withTimeout(
   fn: () => Promise<CheckResult>,
 ): Promise<[string, CheckResult]> {
   const started = Date.now();
+  const budget = CHECK_TIMEOUT_MS[name] ?? DEFAULT_TIMEOUT_MS;
   try {
     const result = await Promise.race([
       fn(),
       new Promise<CheckResult>((_, reject) =>
-        setTimeout(() => reject(new Error('timeout')), CHECK_TIMEOUT_MS),
+        setTimeout(() => reject(new Error('timeout')), budget),
       ),
     ]);
     return [name, result];
@@ -60,7 +77,10 @@ async function anthropicCheck(): Promise<CheckResult> {
     return { ok: false, latencyMs: 0, note: 'not configured' };
   }
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), CHECK_TIMEOUT_MS);
+  const timer = setTimeout(
+    () => controller.abort(),
+    CHECK_TIMEOUT_MS.anthropic ?? DEFAULT_TIMEOUT_MS,
+  );
   try {
     const res = await fetch('https://api.anthropic.com/v1/models?limit=1', {
       headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01' },
