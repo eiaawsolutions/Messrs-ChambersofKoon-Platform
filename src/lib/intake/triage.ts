@@ -42,12 +42,28 @@ export interface TurnResult {
 /** After this many exchanges, brief regardless — an endless intake helps nobody. */
 const FORCE_BRIEF_AFTER_EXCHANGES = 6;
 
-function looksComplete(reply: string, exchanges: number): boolean {
-  // The prompt tells the agent to say so and stop asking, so a trailing
-  // question is the reliable signal it has not finished.
-  const asksAQuestion = /\?\s*$/.test(reply.trim());
-  if (exchanges >= FORCE_BRIEF_AFTER_EXCHANGES) return true;
-  return !asksAQuestion && exchanges >= 3;
+/**
+ * Has the conversation reached the point of handing over to a lawyer?
+ *
+ * Three ways to be done, in order of strength:
+ *
+ *  1. **Contact details are on file** after a few exchanges. Someone who has
+ *     given their name and a way to reach them has finished telling their
+ *     story; continuing to interrogate is how people abandon an enquiry. A
+ *     lawyer can ask the rest at the consultation — that is what it is for.
+ *  2. The agent stopped asking questions, as the prompt instructs.
+ *  3. The hard cap, so a chatty model cannot trap anyone in a loop.
+ */
+function looksComplete(params: {
+  reply: string;
+  exchanges: number;
+  hasContactDetails: boolean;
+}): boolean {
+  if (params.exchanges >= FORCE_BRIEF_AFTER_EXCHANGES) return true;
+  if (params.hasContactDetails && params.exchanges >= 4) return true;
+
+  const asksAQuestion = /\?\s*$/.test(params.reply.trim());
+  return !asksAQuestion && params.exchanges >= 3;
 }
 
 /** One conversational turn. Persists both sides of the exchange. */
@@ -81,6 +97,15 @@ export async function respondToTurn(params: {
     if (contact.phone) patch.contactPhone = contact.phone;
     await db.update(enquiries).set(patch).where(eq(enquiries.id, params.enquiryId));
   }
+
+  const [enquiryRow] = await db
+    .select({ email: enquiries.contactEmail, phone: enquiries.contactPhone })
+    .from(enquiries)
+    .where(eq(enquiries.id, params.enquiryId))
+    .limit(1);
+  const hasContactDetails = Boolean(
+    contact.email || contact.phone || enquiryRow?.email || enquiryRow?.phone,
+  );
 
   const cleaned = scrubFreeText(params.userMessage).slice(0, 4000);
 
@@ -118,7 +143,15 @@ export async function respondToTurn(params: {
   });
 
   const turnCount = history.length + 2;
-  return { reply, turnCount, readyForBrief: looksComplete(reply, turnCount / 2) };
+  return {
+    reply,
+    turnCount,
+    readyForBrief: looksComplete({
+      reply,
+      exchanges: Math.floor(turnCount / 2),
+      hasContactDetails,
+    }),
+  };
 }
 
 export interface TriageOutcome {
