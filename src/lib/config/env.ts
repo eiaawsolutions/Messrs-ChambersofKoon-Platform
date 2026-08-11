@@ -34,7 +34,7 @@ const nonSecretSchema = z.object({
   EMBEDDING_MODEL_VERSION: z.string().default('voyage-law-2'),
   EMBEDDING_DIMENSIONS: z.coerce.number().int().positive().default(1024),
 
-  RESEND_FROM_ADDRESS: z.string().email().default('notifications@mail.eiaawsolutions.com'),
+  RESEND_FROM_ADDRESS: z.string().email().default('notifications@eiaawsolutions.com'),
   RESEND_FROM_NAME: z.string().default('Messrs Chambers of Koon'),
   RESEND_REPLY_TO: z.string().email().optional(),
 
