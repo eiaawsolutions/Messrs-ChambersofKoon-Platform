@@ -2,7 +2,19 @@
 nixPkgs = ["nodejs_22"]
 
 [phases.install]
-cmds = ["npm ci --include=dev"]
+# `npm ci` is preferred: it is reproducible and fails loudly on a stale lockfile.
+#
+# The fallback exists because the lockfile is generated on Windows and the
+# build runs on Linux. npm does not always record the Linux-side optional
+# dependencies of native packages (Tailwind's oxide binding pulls
+# @emnapi/core through a peer of an optional package), so `npm ci` can fail
+# with "Missing: … from lock file" on a lockfile that is perfectly valid on
+# the machine that produced it.
+#
+# Falling back to `npm install` resolves fresh for this platform. Reproducibility
+# is preserved for the common case, and CI still runs `npm ci` on Linux, so a
+# genuinely broken lockfile is caught there rather than hidden here.
+cmds = ["npm ci --include=dev --no-audit --no-fund || npm install --include=dev --no-audit --no-fund"]
 
 [phases.build]
 cmds = ["npm run build"]
