@@ -28,7 +28,22 @@ let clientInstance: S3Client | null = null;
  */
 export async function resolveEndpoint(): Promise<string | undefined> {
   const explicit = config().STORAGE_ENDPOINT;
-  if (explicit) return explicit;
+
+  // STORAGE_ENDPOINT is read from the non-secret schema, so it is never passed
+  // through the resolver. If someone configures it as a `secret://` handle the
+  // literal string would otherwise be handed to the S3 client as an endpoint
+  // URL, which fails deep inside the SDK with an opaque EndpointError. Treat a
+  // handle here as "not configured" and derive instead.
+  if (explicit && explicit.startsWith('secret://')) {
+    console.warn(
+      '[storage] STORAGE_ENDPOINT is a secret:// handle but is read as plain configuration. ' +
+        'Ignoring it and deriving the endpoint from STORAGE_ACCOUNT_ID. ' +
+        'Set STORAGE_ENDPOINT to a literal URL, or unset it.',
+    );
+  } else if (explicit) {
+    return explicit;
+  }
+
   const accountId = await optionalSecret('STORAGE_ACCOUNT_ID');
   return accountId ? `https://${accountId}.r2.cloudflarestorage.com` : undefined;
 }
@@ -174,7 +189,10 @@ export async function storageHealthCheck(): Promise<{
     let note: string;
     if (/Missing secret|cannot be resolved|not configured/i.test(message)) {
       note = 'credentials unresolved (Infisical resolver off?)';
-    } else if (/AccessDenied|Forbidden|Unknown/i.test(name) || /Access Denied/i.test(message)) {
+    } else if (
+      /AccessDenied|Forbidden|Unknown|NoSuchBucket|EndpointError/i.test(name) ||
+      /Access Denied/i.test(message)
+    ) {
       note = `bucket "${bucket()}" not reachable with these credentials — create it and scope the R2 token to it`;
     } else {
       note = name;
