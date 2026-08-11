@@ -33,6 +33,23 @@ const TASK_MODEL_CLASS: Record<AiTask, 'drafting' | 'classify' | 'vision'> = {
   'rag.query_rewrite': 'classify', // Haiku-class: cheap
 };
 
+/**
+ * Whether to send `temperature`.
+ *
+ * Model IDs are configuration, not constants (PRD §6.1), so this code has to
+ * survive being pointed at a model with different parameter support. Newer
+ * Claude models reject `temperature` outright — the request fails with
+ * "temperature is deprecated for this model", which took down intake the first
+ * time a live enquiry hit it.
+ *
+ * Default is to omit it. The prompts are explicit enough that sampling
+ * temperature was never carrying much, and an omitted optional parameter can
+ * never be the reason a client's enquiry fails.
+ */
+function sendTemperature(): boolean {
+  return process.env.AI_SEND_TEMPERATURE === 'true';
+}
+
 export function modelFor(task: AiTask): string {
   const cfg = config();
   switch (TASK_MODEL_CLASS[task]) {
@@ -201,7 +218,7 @@ export async function generateText(options: TextCallOptions): Promise<TextResult
     const response = await anthropic.messages.create({
       model,
       max_tokens: options.maxTokens ?? 4096,
-      temperature: options.temperature ?? 0.3,
+      ...(sendTemperature() ? { temperature: options.temperature ?? 0.3 } : {}),
       system: options.system.text,
       messages: options.messages,
     });
@@ -289,7 +306,7 @@ export async function generateStructured<T extends z.ZodTypeAny>(
       response = await anthropic.messages.create({
         model,
         max_tokens: options.maxTokens ?? 4096,
-        temperature: options.temperature ?? 0.2,
+        ...(sendTemperature() ? { temperature: options.temperature ?? 0.2 } : {}),
         system: options.system.text,
         messages,
         tools: [tool],
