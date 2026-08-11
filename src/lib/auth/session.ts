@@ -24,7 +24,19 @@ import { sha256 } from '@/lib/security/crypto';
  */
 
 export const getActor = cache(async (): Promise<Actor | null> => {
-  const session = await auth();
+  let session: Awaited<ReturnType<typeof auth>>;
+  try {
+    session = await auth();
+  } catch (error) {
+    // Auth cannot initialise — almost always because AUTH_SECRET is still a
+    // secret:// handle and the Infisical resolver is off. Treat it as "nobody
+    // is signed in" rather than a 500: every protected page then redirects to
+    // /sign-in, which explains the state, and no unauthenticated request is
+    // ever mistaken for an authenticated one.
+    console.error('[auth] session resolution failed:', (error as Error).message);
+    return null;
+  }
+
   const userId = session?.user?.id;
   if (!userId) return null;
 
@@ -48,7 +60,7 @@ export const getActor = cache(async (): Promise<Actor | null> => {
   if (!row) return null;
 
   // Session was invalidated server-side (suspend, role change, 2FA reset).
-  if (row.sessionEpoch !== (session.user.sessionEpoch ?? 0)) {
+  if (row.sessionEpoch !== (session?.user.sessionEpoch ?? 0)) {
     return null;
   }
 

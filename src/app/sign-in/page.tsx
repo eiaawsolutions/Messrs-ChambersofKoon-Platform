@@ -69,7 +69,15 @@ export default async function SignInPage({
               <form
                 action={async () => {
                   'use server';
-                  await signIn('google', { redirectTo: '/dashboard' });
+                  try {
+                    await signIn('google', { redirectTo: '/dashboard' });
+                  } catch (error) {
+                    // next-auth signals a successful redirect by throwing; only
+                    // a genuine configuration failure should surface.
+                    if ((error as { digest?: string }).digest?.startsWith('NEXT_REDIRECT'))
+                      throw error;
+                    redirect('/sign-in?error=configuration');
+                  }
                 }}
               >
                 <button className="btn btn-secondary w-full" type="submit">
@@ -82,7 +90,13 @@ export default async function SignInPage({
               <form
                 action={async () => {
                   'use server';
-                  await signIn('microsoft-entra-id', { redirectTo: '/dashboard' });
+                  try {
+                    await signIn('microsoft-entra-id', { redirectTo: '/dashboard' });
+                  } catch (error) {
+                    if ((error as { digest?: string }).digest?.startsWith('NEXT_REDIRECT'))
+                      throw error;
+                    redirect('/sign-in?error=configuration');
+                  }
                 }}
               >
                 <button className="btn btn-secondary w-full" type="submit">
