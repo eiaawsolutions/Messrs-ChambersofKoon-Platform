@@ -19,7 +19,6 @@ import { scrubFreeText } from '@/lib/ai/tokenise';
 
 export interface CreateEnquiryInput {
   source: 'widget' | 'form' | 'manual';
-  sessionToken?: string;
   ip?: string | null;
   userAgent?: string | null;
   origin?: string | null;
@@ -37,7 +36,12 @@ export interface CreatedEnquiry {
 }
 
 export async function createEnquiry(input: CreateEnquiryInput): Promise<CreatedEnquiry | null> {
-  const sessionToken = input.sessionToken ?? randomToken(24);
+  // Always minted here, never taken from the request. A client-proposed token
+  // is a session fixation primitive: an unauthenticated caller could name the
+  // token a real enquirer's browser is holding and have both conversations
+  // resolve to one enquiry — reading the other person's transcript back to
+  // them through the agent's replies.
+  const sessionToken = randomToken(24);
 
   const [created] = await db
     .insert(enquiries)
@@ -83,4 +87,20 @@ export async function createEnquiry(input: CreateEnquiryInput): Promise<CreatedE
 /** Park an enquiry for a human after an unrecoverable error. Never lose it. */
 export async function markNeedsReview(enquiryId: string): Promise<void> {
   await db.update(enquiries).set({ status: 'needs_review' }).where(eq(enquiries.id, enquiryId));
+}
+
+/**
+ * Retire the widget session once the enquiry has been handed over.
+ *
+ * Called the moment the agent decides it has enough, rather than waiting for
+ * the triage job to move the status. Without this there is a window — queue
+ * latency plus a Sonnet call — in which the enquirer's next message still
+ * finds a status of `new` and appends to a conversation a lawyer is already
+ * being briefed on.
+ *
+ * The token is cleared, not just marked: a retired session cannot be resumed
+ * by anyone, including whoever uses the browser next.
+ */
+export async function closeSession(enquiryId: string): Promise<void> {
+  await db.update(enquiries).set({ sessionToken: null }).where(eq(enquiries.id, enquiryId));
 }

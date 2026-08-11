@@ -411,7 +411,14 @@ export const enquiries = pgTable(
     caseBriefMd: text('case_brief_md'),
     status: enquiryStatusEnum('status').notNull().default('new'),
     matterId: uuid('matter_id').references(() => matters.id, { onDelete: 'set null' }),
-    /** Session identifier issued to the widget; scopes the conversation. */
+    /**
+     * Session identifier issued to the widget; scopes the conversation.
+     *
+     * Minted server-side and never accepted from the client, and unique so two
+     * enquiries can never share one — the structural half of the fix for
+     * unrelated enquiries merging into a single transcript. Cleared once the
+     * enquiry is handed to a lawyer, which retires the session for good.
+     */
     sessionToken: varchar('session_token', { length: 64 }),
     submittedIp: varchar('submitted_ip', { length: 64 }),
     modelVersion: varchar('model_version', { length: 80 }),
@@ -421,7 +428,10 @@ export const enquiries = pgTable(
   },
   (t) => [
     index('enquiries_status_idx').on(t.status, t.createdAt),
-    index('enquiries_session_idx').on(t.sessionToken),
+    // Unique rather than plain: nulls are distinct in Postgres, so any number
+    // of handed-over enquiries may hold null, but a live token points at
+    // exactly one conversation.
+    uniqueIndex('enquiries_session_idx').on(t.sessionToken),
     index('enquiries_email_idx').on(t.contactEmail),
   ],
 );
@@ -970,4 +980,5 @@ export type AuditEvent = typeof auditEvents.$inferSelect;
 export type PasswordResetToken = typeof passwordResetTokens.$inferSelect;
 export type RecoveryCode = typeof recoveryCodes.$inferSelect;
 export type Office = (typeof officeEnum.enumValues)[number];
+export type EnquiryStatus = (typeof enquiryStatusEnum.enumValues)[number];
 export type PracticeArea = (typeof practiceAreaEnum.enumValues)[number];

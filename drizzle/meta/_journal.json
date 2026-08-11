@@ -15,6 +15,13 @@
       "when": 1786457389855,
       "tag": "0001_local_credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1786467328479,
+      "tag": "0002_intake_session_uniqueness",
+      "breakpoints": true
     }
   ]
 }

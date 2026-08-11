@@ -10,7 +10,7 @@ import {
   verifyTurnstile,
 } from '@/lib/intake/protection';
 import { findEnquiryBySession, respondToTurn } from '@/lib/intake/triage';
-import { createEnquiry, markNeedsReview } from '@/lib/intake/enquiries';
+import { closeSession, createEnquiry, markNeedsReview } from '@/lib/intake/enquiries';
 import { enqueue, JOBS } from '@/lib/jobs/queue';
 
 export const runtime = 'nodejs';
@@ -89,15 +89,26 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   // Resolve or create the conversation.
+  //
+  // A presented token only ever *selects* an existing conversation; it is
+  // never adopted as the identifier of a new one. Whether it selects anything
+  // is decided by findEnquiryBySession, which refuses tokens naming an enquiry
+  // already handed to a lawyer or idle past the session window. Anything else
+  // starts a fresh enquiry under a freshly minted token — that, and not a
+  // merged transcript, is what a returning browser should produce.
   let enquiryId: string | null = null;
-  let sessionToken = payload.sessionToken ?? null;
+  let sessionToken: string | null = null;
 
-  if (sessionToken) {
-    const sessionLimit = await checkRateLimit(`session:${sessionToken}`, RATE_LIMITS.perSession);
+  if (payload.sessionToken) {
+    const sessionLimit = await checkRateLimit(
+      `session:${payload.sessionToken}`,
+      RATE_LIMITS.perSession,
+    );
     if (!sessionLimit.allowed) {
       return reject(429, 'Too many requests. Please try again later.', origin);
     }
-    enquiryId = await findEnquiryBySession(sessionToken);
+    enquiryId = await findEnquiryBySession(payload.sessionToken);
+    if (enquiryId) sessionToken = payload.sessionToken;
   }
 
   if (!enquiryId) {
@@ -111,7 +122,6 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     const created = await createEnquiry({
       source: 'widget',
-      ...(sessionToken ? { sessionToken } : {}),
       ip,
       userAgent: request.headers.get('user-agent'),
       origin,
@@ -134,6 +144,11 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     // propose a slot. Both run in the background so the enquirer is not left
     // waiting on a Sonnet call plus a scheduling sweep.
     if (turn.readyForBrief) {
+      // Retire the session before queuing, so a message sent while the brief
+      // is being written opens a new enquiry instead of landing on the one a
+      // lawyer is about to read.
+      await closeSession(enquiryId);
+      sessionToken = null;
       await enqueue(JOBS.TRIAGE_ENQUIRY, { enquiryId }, { singletonKey: `triage-${enquiryId}` });
     }
 
@@ -147,11 +162,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     );
   } catch (error) {
     console.error('[intake] turn failed', (error as Error).message);
-    // Park it for a human rather than losing the enquiry.
+    // Park it for a human rather than losing the enquiry, and retire the
+    // session with it: a parked enquiry is not a conversation to continue.
     await markNeedsReview(enquiryId);
+    await closeSession(enquiryId);
     return NextResponse.json(
       {
-        sessionToken,
+        sessionToken: null,
         reply:
           'Sorry — something went wrong on our side. Your message has been saved and someone ' +
           'from the firm will follow up. If this is urgent, please call the office.',

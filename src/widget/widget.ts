@@ -29,9 +29,16 @@ interface WidgetConfig {
 }
 
 interface TurnResponse {
-  sessionToken: string;
+  /** Null once the enquiry has been handed to a lawyer; the session is over. */
+  sessionToken: string | null;
   reply: string;
   complete: boolean;
+}
+
+/** What is kept between reloads: the token and when it was last used. */
+interface StoredSession {
+  token: string;
+  lastActivity: number;
 }
 
 (function initWidget(): void {
@@ -47,21 +54,70 @@ interface TurnResponse {
     office: script.dataset.office ?? null,
   };
 
-  const STORAGE_KEY = 'cok_intake_session';
+  const STORAGE_KEY = 'cok_intake_session_v2';
+  /** The v1 key lived in localStorage forever. Purged on sight; see below. */
+  const LEGACY_STORAGE_KEY = 'cok_intake_session';
   const MOUNT_ID = 'cok-intake-widget';
+
+  /**
+   * Client-side session lifetime, matching SESSION_IDLE_WINDOW_MINUTES on the
+   * server. The server is the authority — this only avoids sending a token
+   * that is certain to be refused.
+   */
+  const SESSION_IDLE_WINDOW_MS = 120 * 60 * 1000;
 
   if (document.getElementById(MOUNT_ID)) return; // never mount twice
 
-  let sessionToken: string | null = null;
-  try {
-    sessionToken = window.localStorage.getItem(STORAGE_KEY);
-  } catch {
-    // Private browsing or blocked storage: the conversation simply does not
-    // resume across reloads. Not worth failing over.
+  /**
+   * Why sessionStorage and not localStorage.
+   *
+   * The token says "append to that conversation". Held in localStorage it
+   * outlives the enquiry, the tab and the person: a second enquirer on a
+   * shared machine — or the same person back months later with an unrelated
+   * matter — sent their first message into someone else's transcript, and the
+   * lawyer received one brief describing two enquiries. sessionStorage is
+   * scoped to the tab and cleared when it closes, which is the honest lifetime
+   * of a single enquiry. The idle stamp handles a tab left open all day.
+   */
+  function readSession(): string | null {
+    try {
+      // Retire any v1 token still sitting in localStorage from before the fix.
+      window.localStorage.removeItem(LEGACY_STORAGE_KEY);
+
+      const raw = window.sessionStorage.getItem(STORAGE_KEY);
+      if (!raw) return null;
+      const stored = JSON.parse(raw) as Partial<StoredSession>;
+      if (typeof stored.token !== 'string' || typeof stored.lastActivity !== 'number') return null;
+      if (Date.now() - stored.lastActivity > SESSION_IDLE_WINDOW_MS) {
+        window.sessionStorage.removeItem(STORAGE_KEY);
+        return null;
+      }
+      return stored.token;
+    } catch {
+      // Private browsing, blocked storage or malformed JSON: the conversation
+      // simply does not resume across reloads. Not worth failing over.
+      return null;
+    }
   }
 
+  function writeSession(token: string | null): void {
+    try {
+      if (token === null) {
+        window.sessionStorage.removeItem(STORAGE_KEY);
+        return;
+      }
+      const stored: StoredSession = { token, lastActivity: Date.now() };
+      window.sessionStorage.setItem(STORAGE_KEY, JSON.stringify(stored));
+    } catch {
+      /* storage blocked; conversation continues in-memory */
+    }
+  }
+
+  let sessionToken: string | null = readSession();
   let open = false;
   let sending = false;
+  /** True once the firm has the enquiry: nothing more may be added to it. */
+  let handedOver = false;
   let lastFocused: Element | null = null;
 
   const host = document.createElement('div');
@@ -133,7 +189,19 @@ interface TurnResponse {
   .send:disabled { opacity: .5; cursor: not-allowed; }
   .send:focus-visible { outline: 3px solid #a9772e; outline-offset: 2px; }
 
+  form[hidden] { display: none; }
+
   .note { padding: 0 18px 12px; margin: 0; font-size: 11.5px; color: #8d95a1; }
+
+  .handover { padding: 14px 18px 16px; background: #fff; border-top: 1px solid #e2ded5; }
+  .handover[hidden] { display: none; }
+  .handover p { margin: 0 0 10px; font-size: 13px; color: #5a6472; }
+  .restart {
+    width: 100%; padding: 10px 14px; border: 1px solid #1f4460; border-radius: 5px;
+    background: #fff; color: #1f4460; font: inherit; font-weight: 500; cursor: pointer;
+  }
+  .restart:hover { background: #f3f6f8; }
+  .restart:focus-visible { outline: 3px solid #a9772e; outline-offset: 2px; }
 
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
   @media (max-width: 480px) {
@@ -165,6 +233,14 @@ interface TurnResponse {
         autocomplete="off"></textarea>
       <button class="send" type="submit">Send</button>
     </form>
+    <div class="handover" hidden>
+      <p>
+        This enquiry is now with the firm and nothing further can be added to it. If you have a
+        separate matter, you can start a new enquiry.
+      </p>
+      <button class="restart" type="button">Start a new enquiry</button>
+    </div>
+
     <p class="note">
       We cannot give legal advice here. Nothing you send creates a solicitor-client relationship.
     </p>
@@ -180,6 +256,8 @@ interface TurnResponse {
   const form = root.querySelector('form') as HTMLFormElement;
   const input = root.querySelector('textarea') as HTMLTextAreaElement;
   const sendBtn = root.querySelector('.send') as HTMLButtonElement;
+  const handoverBox = root.querySelector('.handover') as HTMLElement;
+  const restartBtn = root.querySelector('.restart') as HTMLButtonElement;
 
   function escapeHtml(value: string): string {
     return value.replace(/[&<>"']/g, (c) => {
@@ -220,7 +298,41 @@ interface TurnResponse {
   function focusables(): HTMLElement[] {
     return Array.from(
       panel.querySelectorAll<HTMLElement>('button, textarea, [href], input, select'),
-    ).filter((el) => !el.hasAttribute('disabled'));
+    ).filter((el) => !el.hasAttribute('disabled') && !el.closest('[hidden]'));
+  }
+
+  function greet(): void {
+    addMessage(
+      `Hello. I can take some details about your matter so the right lawyer at ${config.firmName} ` +
+        `can help. What has happened?`,
+      'bot',
+    );
+  }
+
+  /**
+   * The enquiry has reached a lawyer. Close the composer rather than leaving
+   * it open: a reply typed after the handover would have opened a second
+   * enquiry the person did not know they were making, and before the session
+   * fix it silently joined itself to the finished one instead.
+   */
+  function markHandedOver(): void {
+    handedOver = true;
+    sessionToken = null;
+    writeSession(null);
+    form.hidden = true;
+    handoverBox.hidden = false;
+    restartBtn.focus();
+  }
+
+  function restart(): void {
+    handedOver = false;
+    sessionToken = null;
+    writeSession(null);
+    log.replaceChildren();
+    handoverBox.hidden = true;
+    form.hidden = false;
+    greet();
+    input.focus();
   }
 
   function openPanel(): void {
@@ -229,15 +341,9 @@ interface TurnResponse {
     lastFocused = document.activeElement;
     panel.hidden = false;
     launcher.hidden = true;
-    input.focus();
+    (handedOver ? restartBtn : input).focus();
 
-    if (log.childElementCount === 0) {
-      addMessage(
-        `Hello. I can take some details about your matter so the right lawyer at ${config.firmName} ` +
-          `can help. What has happened?`,
-        'bot',
-      );
-    }
+    if (log.childElementCount === 0) greet();
   }
 
   function closePanel(): void {
@@ -250,6 +356,7 @@ interface TurnResponse {
 
   launcher.addEventListener('click', openPanel);
   closeBtn.addEventListener('click', closePanel);
+  restartBtn.addEventListener('click', restart);
 
   // Escape closes; Tab is trapped inside the dialog while it is open.
   root.addEventListener('keydown', (event) => {
@@ -306,7 +413,7 @@ interface TurnResponse {
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     const message = input.value.trim();
-    if (!message || sending) return;
+    if (!message || sending || handedOver) return;
 
     sending = true;
     sendBtn.disabled = true;
@@ -341,15 +448,16 @@ interface TurnResponse {
       }
 
       const data = (await response.json()) as TurnResponse;
-      if (data.sessionToken) {
-        sessionToken = data.sessionToken;
-        try {
-          window.localStorage.setItem(STORAGE_KEY, sessionToken);
-        } catch {
-          /* storage blocked; conversation continues in-memory */
-        }
-      }
+
+      // The server is authoritative about which conversation this is. It
+      // returns a fresh token whenever it decided the presented one could not
+      // continue — a handed-over or long-idle enquiry — so the browser's copy
+      // is always replaced rather than kept alongside.
+      sessionToken = data.sessionToken ?? null;
+      writeSession(sessionToken);
+
       addMessage(data.reply, 'bot');
+      if (data.complete) markHandedOver();
     } catch {
       setTyping(false);
       addMessage(
@@ -359,7 +467,9 @@ interface TurnResponse {
     } finally {
       sending = false;
       sendBtn.disabled = false;
-      input.focus();
+      // Never back into the composer once it has been closed — markHandedOver
+      // has already moved focus to the only control still available.
+      if (!handedOver) input.focus();
     }
   });
 })();

@@ -1,7 +1,8 @@
 import 'server-only';
-import { eq, desc } from 'drizzle-orm';
+import { eq, desc, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import { enquiries, enquiryMessages } from '@/lib/db/schema';
+import { isResumable } from '@/lib/intake/session';
 import { generateStructured, generateText, AiSchemaError } from '@/lib/ai/client';
 import { INTAKE_SYSTEM, INTAKE_BRIEF_SYSTEM, wrapUntrusted } from '@/lib/ai/prompts';
 import { caseBriefJsonSchema, caseBriefSchema, type CaseBrief } from '@/lib/ai/schemas';
@@ -115,11 +116,15 @@ export async function respondToTurn(params: {
     content: cleaned,
   });
 
+  // Earlier turns are replayed wrapped too. Only the newest message used to
+  // be fenced, so an instruction planted on turn one arrived unfenced on turn
+  // two and read as though the firm had written it (OWASP LLM01).
   const messages = [
-    ...history.map((m) => ({
-      role: m.role === 'assistant' ? ('assistant' as const) : ('user' as const),
-      content: m.content,
-    })),
+    ...history.map((m) =>
+      m.role === 'assistant'
+        ? { role: 'assistant' as const, content: m.content }
+        : { role: 'user' as const, content: wrapUntrusted('enquirer_message', m.content) },
+    ),
     {
       role: 'user' as const,
       content: wrapUntrusted('enquirer_message', cleaned),
@@ -285,13 +290,31 @@ export function renderBriefMarkdown(brief: CaseBrief): string {
   return sections.join('\n\n');
 }
 
-/** Most recent enquiry for a widget session, used to continue a conversation. */
+/**
+ * The enquiry a widget session may continue, or null to start a fresh one.
+ *
+ * A matching token is necessary but not sufficient — see `isResumable`. A
+ * token that names a handed-over or long-idle enquiry is not an error and is
+ * not reported as one; the caller simply opens a new conversation, which is
+ * what the person at the keyboard is actually doing.
+ */
 export async function findEnquiryBySession(sessionToken: string): Promise<string | null> {
   const [row] = await db
-    .select({ id: enquiries.id })
+    .select({
+      id: enquiries.id,
+      status: enquiries.status,
+      createdAt: enquiries.createdAt,
+      lastMessageAt: sql<Date | null>`(
+        select max(m.created_at) from enquiry_messages m where m.enquiry_id = ${enquiries.id}
+      )`,
+    })
     .from(enquiries)
     .where(eq(enquiries.sessionToken, sessionToken))
     .orderBy(desc(enquiries.createdAt))
     .limit(1);
-  return row?.id ?? null;
+
+  if (!row) return null;
+
+  const lastActivityAt = row.lastMessageAt ? new Date(row.lastMessageAt) : row.createdAt;
+  return isResumable({ status: row.status, lastActivityAt }) ? row.id : null;
 }
