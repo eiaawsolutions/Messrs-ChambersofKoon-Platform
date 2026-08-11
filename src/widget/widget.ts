@@ -301,7 +301,21 @@ interface StoredSession {
     ).filter((el) => !el.hasAttribute('disabled') && !el.closest('[hidden]'));
   }
 
+  /**
+   * The opening line depends on whether this tab already has an enquiry.
+   *
+   * After a reload the panel is empty but the enquiry is not, so greeting
+   * someone as a stranger reads as though their story has been lost. The
+   * transcript is deliberately not fetched back — that would mean an
+   * unauthenticated endpoint reading out a family-law conversation to whoever
+   * holds the token — so the wording claims only what this tab knows: that
+   * there is something to carry on with.
+   */
   function greet(): void {
+    if (sessionToken) {
+      addMessage('Welcome back. Carry on below when you are ready.', 'bot');
+      return;
+    }
     addMessage(
       `Hello. I can take some details about your matter so the right lawyer at ${config.firmName} ` +
         `can help. What has happened?`,

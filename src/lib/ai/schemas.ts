@@ -69,19 +69,53 @@ export const classificationJsonSchema = {
 // Intake case brief
 // ---------------------------------------------------------------------------
 
+/**
+ * A list field the model may hand back in a slightly different shape.
+ *
+ * Live intake failed on exactly this: `facts` came back as one prose string
+ * and `openQuestions` was omitted entirely, so validation failed twice and the
+ * whole brief was discarded — a lawyer got nothing because a list arrived as a
+ * sentence. The content was there and usable.
+ *
+ * Normalising is not the same as accepting a partial result. AI-3's "never
+ * render a partial draft" governs drafting, where an invented clause is
+ * dangerous. A brief whose facts arrived as prose is complete; it is shaped
+ * differently. Anything genuinely absent becomes an empty list, which the UI
+ * already renders as "nothing recorded".
+ */
+function tolerantStringList(maxLength: number, maxItems: number) {
+  return z.preprocess(
+    (value) => {
+      if (Array.isArray(value)) return value.map((item) => String(item));
+      if (typeof value === 'string') {
+        const trimmed = value.trim();
+        if (!trimmed) return [];
+        // Prose arrives as a paragraph, or as its own bulleted/numbered list.
+        const lines = trimmed
+          .split(/\r?\n+/)
+          .map((line) => line.replace(/^\s*(?:[-*•]|\d+[.)])\s*/, '').trim())
+          .filter(Boolean);
+        return lines.length > 1 ? lines : [trimmed];
+      }
+      return [];
+    },
+    z.array(z.string().max(maxLength)).max(maxItems),
+  );
+}
+
 export const caseBriefSchema = z.object({
-  contactName: z.string().max(200),
-  contactEmail: z.string().max(320),
-  contactPhone: z.string().max(40),
+  contactName: z.string().max(200).catch(''),
+  contactEmail: z.string().max(320).catch(''),
+  contactPhone: z.string().max(40).catch(''),
   practiceArea: z.enum(PRACTICE_AREAS),
   urgency: z.enum(URGENCIES),
   confidence: z.number().int().min(0).max(100),
   summary: z.string().min(1).max(2000),
-  facts: z.array(z.string().max(500)).max(20),
-  openQuestions: z.array(z.string().max(300)).max(10),
-  suggestedNextStep: z.string().max(300),
-  safetyConcern: z.boolean(),
-  complete: z.boolean(),
+  facts: tolerantStringList(500, 20),
+  openQuestions: tolerantStringList(300, 10),
+  suggestedNextStep: z.string().max(300).catch(''),
+  safetyConcern: z.boolean().catch(false),
+  complete: z.boolean().catch(true),
 });
 
 export type CaseBrief = z.infer<typeof caseBriefSchema>;
@@ -207,9 +241,14 @@ export const queryRewriteJsonSchema = {
 // ---------------------------------------------------------------------------
 
 export const clauseDraftSchema = z.object({
+  // The clause itself stays strict. AI-3 is explicit that a malformed draft
+  // fails to a human rather than rendering partially, and an absent or
+  // truncated clause is exactly that.
   text: z.string().min(1).max(20_000),
-  missingFacts: z.array(z.string().max(300)).max(20),
-  citedSources: z.array(z.string().max(120)).max(20),
+  // The two lists around it are reporting, not content. A usable clause should
+  // not be thrown away because its accompanying checklist arrived as prose.
+  missingFacts: tolerantStringList(300, 20),
+  citedSources: tolerantStringList(120, 20),
 });
 
 export type ClauseDraft = z.infer<typeof clauseDraftSchema>;
