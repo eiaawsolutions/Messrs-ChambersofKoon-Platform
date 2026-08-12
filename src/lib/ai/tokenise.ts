@@ -138,6 +138,23 @@ export function scrubFreeText(text: string): string {
 }
 
 /**
+ * True when a value is a redaction placeholder rather than a real detail.
+ *
+ * The guard every path that *stores* model output needs. A model reading a
+ * scrubbed transcript sees `[EMAIL]`, and — asked for the address verbatim —
+ * returns `[EMAIL]`, correctly, because that is what the transcript says.
+ * Writing that back over the address the enquirer actually typed replaces a
+ * working contact detail with a string no mail server will accept, and the
+ * failure surfaces days later at the point of sending.
+ *
+ * Matches both scrub placeholders (`[EMAIL]`, `[ID_NUMBER]`) and vault tokens
+ * (`[PERSON_1]`).
+ */
+export function looksRedacted(value: string): boolean {
+  return /\[[A-Z][A-Z0-9_]*\]/.test(value);
+}
+
+/**
  * Build a vault pre-loaded with the identifiers on a matter bundle.
  * Returns the vault plus a redactor bound to it.
  */

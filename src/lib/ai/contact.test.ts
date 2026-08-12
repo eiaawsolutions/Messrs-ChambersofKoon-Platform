@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { extractContactDetails, scrubFreeText } from './tokenise';
+import { extractContactDetails, looksRedacted, scrubFreeText } from './tokenise';
 
 /**
  * Contact capture during intake (FR-2.4, AI-1).
@@ -34,5 +34,40 @@ describe('extractContactDetails', () => {
     const r = extractContactDetails('I need help with a divorce.');
     expect(r.email).toBeNull();
     expect(r.phone).toBeNull();
+  });
+});
+
+/**
+ * The other half of the same rule: what the scrub produces must never be
+ * mistaken for a real detail on the way back in. A model summarising a scrubbed
+ * transcript reports the enquirer's address as `[EMAIL]`, and storing that
+ * replaces a working contact detail with one no mail server accepts.
+ */
+describe('looksRedacted', () => {
+  it('recognises every placeholder the scrub emits', () => {
+    for (const token of ['[EMAIL]', '[PHONE]', '[ID_NUMBER]', '[PASSPORT]', '[ACCOUNT]']) {
+      expect(looksRedacted(token)).toBe(true);
+    }
+  });
+
+  it('recognises vault tokens', () => {
+    expect(looksRedacted('[PERSON_1]')).toBe(true);
+    expect(looksRedacted('[MATTER_REF_12]')).toBe(true);
+  });
+
+  it('recognises a placeholder embedded in a longer value', () => {
+    expect(looksRedacted('reachable at [EMAIL] most days')).toBe(true);
+  });
+
+  it('passes real contact details through', () => {
+    for (const value of [
+      'nurul.aisyah@example.com',
+      '+60125550148',
+      'Nurul Aisyah binti Rahman',
+      "O'Brien-Tan",
+      '',
+    ]) {
+      expect(looksRedacted(value)).toBe(false);
+    }
   });
 });

@@ -28,6 +28,7 @@ import { audit, AUDIT_ACTIONS } from '@/lib/audit/log';
 import { randomToken, sha256 } from '@/lib/security/crypto';
 import { loadTemplate } from '@/lib/comms/templates';
 import { raiseException } from '@/lib/comms/milestones';
+import { isPlausibleEmail } from '@/lib/intake/details';
 import type { Actor } from '@/lib/auth/guard';
 
 /**
@@ -344,6 +345,8 @@ export async function acceptProposal(params: {
     .limit(1);
 
   const office = enquiry?.office ?? 'KL';
+  const clientEmail = deliverableEmail(enquiry?.contactEmail);
+  const clientName = enquiry?.contactName ?? 'The enquirer';
 
   /*
    * An enquiry that already has a confirmed consultation is being *moved*, not
@@ -408,7 +411,7 @@ export async function acceptProposal(params: {
       endsAt: proposal.endsAt,
       location: officeAddress(office),
       title: `Consultation — ${(enquiry?.practiceArea ?? 'general').replace(/_/g, ' ')}`,
-      clientEmail: enquiry?.contactEmail ?? null,
+      clientEmail,
       clientName: enquiry?.contactName ?? null,
       // Placeholder; replaced below now that the row id exists.
       icsUid: `pending-${randomToken(8)}`,
@@ -447,22 +450,42 @@ export async function acceptProposal(params: {
     },
   });
 
-  if (enquiry?.contactEmail && lawyer) {
-    await dispatchInvitation({
-      appointmentId: appointment.id,
-      icsUid,
-      sequence: 0,
-      method: 'REQUEST',
-      startsAt: proposal.startsAt,
-      endsAt: proposal.endsAt,
-      location: officeAddress(office),
-      clientEmail: enquiry.contactEmail,
-      clientName: enquiry.contactName ?? 'Client',
-      lawyerEmail: lawyer.email,
-      lawyerName: lawyer.fullName,
-      practiceArea: enquiry.practiceArea ?? 'general',
-      rescheduleToken,
-      enquiryId: enquiry.id,
+  if (clientEmail && lawyer) {
+    await deliverInvitation(
+      {
+        appointmentId: appointment.id,
+        icsUid,
+        sequence: 0,
+        method: 'REQUEST',
+        startsAt: proposal.startsAt,
+        endsAt: proposal.endsAt,
+        location: officeAddress(office),
+        clientEmail,
+        clientName: enquiry?.contactName ?? 'Client',
+        lawyerEmail: lawyer.email,
+        lawyerName: lawyer.fullName,
+        practiceArea: enquiry?.practiceArea ?? 'general',
+        rescheduleToken,
+        enquiryId: enquiry?.id ?? null,
+      },
+      { actorId: params.actor.id, clientName, what: 'is confirmed' },
+    );
+  } else {
+    /*
+     * Confirmed in the diary with nobody to write to. Previously a silent
+     * skip, which is the one outcome a lawyer must not be left guessing about:
+     * the queue clears, the consultation looks arranged, and the client has no
+     * idea it exists.
+     */
+    await raiseException({
+      matterId: null,
+      assignedUserId: params.actor.id,
+      kind: 'invitation_not_sent',
+      title: `${clientName} has no usable email — the invitation could not be sent`,
+      detail:
+        `The consultation is confirmed in the diary, but the enquiry holds ` +
+        `${lawyer ? 'no valid email address' : 'no assigned lawyer'}, so nothing was sent. ` +
+        `Telephone the enquirer to confirm the appointment.`,
     });
   }
 
@@ -612,22 +635,30 @@ export async function rescheduleAppointment(params: {
     metadata: { icsUid: appointment.icsUid, sequence: nextSequence },
   });
 
-  if (appointment.clientEmail && lawyer) {
-    await dispatchInvitation({
-      appointmentId: appointment.id,
-      icsUid: appointment.icsUid,
-      sequence: nextSequence,
-      method: 'REQUEST',
-      startsAt: params.startsAt,
-      endsAt: params.endsAt,
-      location: appointment.location,
-      clientEmail: appointment.clientEmail,
-      clientName: appointment.clientName ?? 'Client',
-      lawyerEmail: lawyer.email,
-      lawyerName: lawyer.fullName,
-      practiceArea: 'general',
-      enquiryId: appointment.enquiryId,
-    });
+  const clientEmail = deliverableEmail(appointment.clientEmail);
+  if (clientEmail && lawyer) {
+    await deliverInvitation(
+      {
+        appointmentId: appointment.id,
+        icsUid: appointment.icsUid,
+        sequence: nextSequence,
+        method: 'REQUEST',
+        startsAt: params.startsAt,
+        endsAt: params.endsAt,
+        location: appointment.location,
+        clientEmail,
+        clientName: appointment.clientName ?? 'Client',
+        lawyerEmail: lawyer.email,
+        lawyerName: lawyer.fullName,
+        practiceArea: 'general',
+        enquiryId: appointment.enquiryId,
+      },
+      {
+        actorId: params.actor.id,
+        clientName: appointment.clientName ?? 'The client',
+        what: 'has moved',
+      },
+    );
   }
 }
 
@@ -656,21 +687,83 @@ export async function cancelAppointment(params: {
     .where(eq(users.id, appointment.userId))
     .limit(1);
 
-  if (appointment.clientEmail && lawyer) {
-    await dispatchInvitation({
-      appointmentId: appointment.id,
-      icsUid: appointment.icsUid,
-      sequence: nextSequence,
-      method: 'CANCEL',
-      startsAt: appointment.startsAt,
-      endsAt: appointment.endsAt,
-      location: appointment.location,
-      clientEmail: appointment.clientEmail,
-      clientName: appointment.clientName ?? 'Client',
-      lawyerEmail: lawyer.email,
-      lawyerName: lawyer.fullName,
-      practiceArea: 'general',
-      enquiryId: appointment.enquiryId,
+  const clientEmail = deliverableEmail(appointment.clientEmail);
+  if (clientEmail && lawyer) {
+    await deliverInvitation(
+      {
+        appointmentId: appointment.id,
+        icsUid: appointment.icsUid,
+        sequence: nextSequence,
+        method: 'CANCEL',
+        startsAt: appointment.startsAt,
+        endsAt: appointment.endsAt,
+        location: appointment.location,
+        clientEmail,
+        clientName: appointment.clientName ?? 'Client',
+        lawyerEmail: lawyer.email,
+        lawyerName: lawyer.fullName,
+        practiceArea: 'general',
+        enquiryId: appointment.enquiryId,
+      },
+      {
+        actorId: params.actor.id,
+        clientName: appointment.clientName ?? 'The client',
+        what: 'is cancelled',
+      },
+    );
+  }
+}
+
+/**
+ * The stored address, if it is one we can actually send to.
+ *
+ * Every caller downstream of this used to test `if (clientEmail)`, which a
+ * redaction placeholder passes — `[EMAIL]` is a perfectly truthy string. The
+ * distinction that matters is not "is something stored" but "will a mail server
+ * accept it", so that is the question asked here.
+ */
+function deliverableEmail(value: string | null | undefined): string | null {
+  const trimmed = value?.trim() ?? '';
+  return isPlausibleEmail(trimmed) ? trimmed : null;
+}
+
+/**
+ * Send an invitation without letting the transport undo the decision that
+ * caused it.
+ *
+ * By the time this runs the appointment is committed and the proposal is marked
+ * accepted — the consultation is in the diary whether or not the mail lands.
+ * Letting the error propagate produced the worst of both: a bare server error
+ * on a page whose action had in fact succeeded, so the lawyer read "it failed"
+ * about a booking that existed, and no record anywhere that the client had not
+ * been told. It is the same reasoning that already guards the lawyer
+ * notification in `proposeSlot`.
+ *
+ * The failure becomes an exception task instead: on the queue the decider
+ * already reads, and explicit that the client heard nothing.
+ */
+async function deliverInvitation(
+  invitation: Parameters<typeof dispatchInvitation>[0],
+  context: { actorId: string; clientName: string; what: string },
+): Promise<void> {
+  try {
+    await dispatchInvitation(invitation);
+  } catch (error) {
+    console.error(
+      '[schedule] appointment %s %s but the invitation to the client failed: %s',
+      invitation.appointmentId,
+      context.what,
+      (error as Error).message,
+    );
+    await raiseException({
+      matterId: null,
+      assignedUserId: context.actorId,
+      kind: 'invitation_delivery_failed',
+      title: `${context.clientName} has not been told — the invitation did not send`,
+      detail:
+        `The consultation ${context.what} in the diary, but the email to the client ` +
+        `failed to send. Contact them directly, then check email delivery. ` +
+        `Reason: ${(error as Error).message}`,
     });
   }
 }

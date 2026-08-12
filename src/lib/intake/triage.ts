@@ -12,6 +12,7 @@ import { generateStructured, generateText, AiSchemaError } from '@/lib/ai/client
 import { INTAKE_SYSTEM, INTAKE_BRIEF_SYSTEM, wrapUntrusted } from '@/lib/ai/prompts';
 import { caseBriefJsonSchema, caseBriefSchema, type CaseBrief } from '@/lib/ai/schemas';
 import { extractContactDetails, scrubFreeText } from '@/lib/ai/tokenise';
+import { contactPatchFromBrief } from '@/lib/intake/brief-contact';
 import { audit, AUDIT_ACTIONS } from '@/lib/audit/log';
 
 /**
@@ -254,12 +255,17 @@ export async function buildCaseBrief(enquiryId: string): Promise<TriageOutcome> 
     throw new Error(`Enquiry ${enquiryId} has no conversation to summarise`);
   }
 
-  const [selection] = await db
-    .select({ enquiryTypeSelected: enquiries.enquiryTypeSelected })
+  const [current] = await db
+    .select({
+      enquiryTypeSelected: enquiries.enquiryTypeSelected,
+      contactName: enquiries.contactName,
+      contactEmail: enquiries.contactEmail,
+      contactPhone: enquiries.contactPhone,
+    })
     .from(enquiries)
     .where(eq(enquiries.id, enquiryId))
     .limit(1);
-  const selectedType = selection?.enquiryTypeSelected ?? null;
+  const selectedType = current?.enquiryTypeSelected ?? null;
 
   const rendered = transcript
     .map((m) => `${m.role === 'assistant' ? 'Assistant' : 'Enquirer'}: ${m.content}`)
@@ -325,12 +331,27 @@ export async function buildCaseBrief(enquiryId: string): Promise<TriageOutcome> 
     mismatched,
   });
 
+  /*
+   * The brief is the weakest source of contact detail on the platform, because
+   * the model that wrote it read a scrubbed transcript and so reports the
+   * enquirer's email as `[EMAIL]`. Taking it at face value here replaced the
+   * address the opening form had validated with a placeholder, and the damage
+   * only surfaced when a lawyer accepted the consultation and the mail
+   * transport rejected the recipient. See `contactPatchFromBrief` for the rules.
+   */
+  const contactPatch = contactPatchFromBrief(
+    {
+      name: current?.contactName ?? null,
+      email: current?.contactEmail ?? null,
+      phone: current?.contactPhone ?? null,
+    },
+    brief,
+  );
+
   await db
     .update(enquiries)
     .set({
-      contactName: brief.contactName || null,
-      contactEmail: brief.contactEmail || null,
-      contactPhone: brief.contactPhone || null,
+      ...contactPatch,
       practiceAreaPredicted: practiceArea,
       urgency: brief.safetyConcern ? 'critical' : brief.urgency,
       confidence: brief.confidence,

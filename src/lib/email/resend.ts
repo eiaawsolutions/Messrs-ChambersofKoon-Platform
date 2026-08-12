@@ -1,5 +1,6 @@
 import 'server-only';
 import { config, secret } from '@/lib/config/env';
+import { isPlausibleEmail } from '@/lib/intake/details';
 
 /**
  * Resend transport (PRD §3.1, FR-7.3, FR-7.7).
@@ -63,12 +64,33 @@ export function senderIdentity(): { from: string; replyTo: string | undefined } 
 }
 
 export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
+  const recipients = (Array.isArray(input.to) ? input.to : [input.to]).map((r) => r.trim());
+
+  /*
+   * Checked here rather than trusted from the caller, because the failure this
+   * prevents is expensive and silent. A redaction placeholder stored as an
+   * address (`[EMAIL]`) passes every `if (email)` test on the way down, reaches
+   * Resend, and comes back as a 422 from inside whatever operation was
+   * half-committed by then. Failing before the network call names the problem
+   * and keeps the caller's own error handling in charge of the consequences.
+   *
+   * The rejected value is safe to log: by definition it is not an address, so
+   * it is not somebody's contact detail.
+   */
+  const invalid = recipients.filter((r) => !isPlausibleEmail(r));
+  if (recipients.length === 0 || invalid.length > 0) {
+    throw new EmailSendError(
+      `Refusing to send to ${invalid.length > 0 ? `an invalid address: ${invalid.join(', ')}` : 'nobody'}`,
+      422,
+    );
+  }
+
   const apiKey = await secret('RESEND_API_KEY');
   const identity = senderIdentity();
 
   const body: Record<string, unknown> = {
     from: identity.from,
-    to: Array.isArray(input.to) ? input.to : [input.to],
+    to: recipients,
     subject: input.subject,
     text: input.text,
   };

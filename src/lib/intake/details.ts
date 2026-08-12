@@ -95,6 +95,16 @@ function code(value: DetailErrorCode): string {
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 /**
+ * The same test the enquiry form applies, reusable by the paths that did not
+ * come through the form — a value recovered from a transcript, or one about to
+ * be handed to the mail transport. One definition of "an address we will
+ * accept" means the form and the sender can never disagree about it.
+ */
+export function isPlausibleEmail(value: string | null | undefined): boolean {
+  return typeof value === 'string' && EMAIL_PATTERN.test(value.trim());
+}
+
+/**
  * Malaysian numbers, canonicalised to E.164.
  *
  * The same person writes `012-555 0148`, `0125550148` and `+60 12 555 0148` on

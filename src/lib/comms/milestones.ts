@@ -351,9 +351,17 @@ export async function raiseException(params: {
   kind: string;
   title: string;
   detail?: string;
+  /**
+   * Who should see it. Falls back to the matter's handling lawyer.
+   *
+   * Worth passing explicitly for anything raised before a matter exists: the
+   * dashboard only shows a reader their *own* open exceptions, so a task with
+   * no matter and no assignee is raised into a queue nobody reads.
+   */
+  assignedUserId?: string | null;
 }): Promise<void> {
-  let assignedUserId: string | null = null;
-  if (params.matterId) {
+  let assignedUserId: string | null = params.assignedUserId ?? null;
+  if (!assignedUserId && params.matterId) {
     const [matter] = await db
       .select({ assigned: matters.assignedUserId, supervising: matters.supervisingUserId })
       .from(matters)
