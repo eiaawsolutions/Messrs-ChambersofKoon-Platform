@@ -1,0 +1,1 @@
+ALTER TABLE "enquiries" ADD COLUMN "enquiry_type_selected" varchar(40);

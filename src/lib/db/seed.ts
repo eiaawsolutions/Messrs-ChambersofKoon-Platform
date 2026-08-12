@@ -452,6 +452,22 @@ No invitation has been sent to the enquirer. Nothing reaches them until you acce
 
 Review and decide: {{dashboardUrl}}`,
   },
+  {
+    key: 'internal.client_reschedule_requested',
+    subject: 'A client has asked to move their consultation',
+    description:
+      'Sent to the lawyer when a client uses the reschedule link (FR-3.8). Internal only.',
+    bodyMd: `{{lawyerName}},
+
+A client has asked to move a consultation that is already in your diary.
+
+Currently booked: {{currentWhen}}
+They have asked for: {{requestedWhen}}
+
+Nothing has changed yet. The existing appointment stands, and their calendar entry is untouched, until you accept — at which point it moves in place rather than being issued twice.
+
+Accept, offer another time, or decline: {{dashboardUrl}}`,
+  },
 ];
 
 async function seedMessageTemplates(): Promise<void> {

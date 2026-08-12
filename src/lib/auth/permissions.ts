@@ -38,6 +38,16 @@ export const PERMISSIONS = {
   ADMIN_MESSAGING_MANAGE: 'admin.messaging.manage',
 
   AUDIT_VIEW: 'audit.view',
+
+  /**
+   * Data subject requests — export and erasure (NFR-2.3).
+   *
+   * Separate from `admin.users.manage` on purpose. Erasing a client's personal
+   * data is irreversible and is answerable to the firm rather than to whoever
+   * happens to administer accounts, so it is granted to the Managing Partner
+   * alone in the stock matrix and has to be granted deliberately to anyone else.
+   */
+  PRIVACY_MANAGE: 'privacy.manage',
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -154,6 +164,11 @@ export const PERMISSION_CATALOGUE: PermissionDefinition[] = [
     category: 'Administration',
   },
   { key: PERMISSIONS.AUDIT_VIEW, description: 'View and export the audit log', category: 'Audit' },
+  {
+    key: PERMISSIONS.PRIVACY_MANAGE,
+    description: "Export or erase a client's personal data on request",
+    category: 'Audit',
+  },
 ];
 
 export const ROLE_NAMES = {
@@ -209,6 +224,7 @@ export const SEEDED_ROLES: SeededRole[] = [
       [PERMISSIONS.ADMIN_AVAILABILITY_MANAGE]: 'all',
       [PERMISSIONS.ADMIN_MESSAGING_MANAGE]: 'all',
       [PERMISSIONS.AUDIT_VIEW]: 'all',
+      [PERMISSIONS.PRIVACY_MANAGE]: 'all',
     },
   },
   {

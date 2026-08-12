@@ -8,6 +8,7 @@ import { pruneRateLimits } from '@/lib/intake/protection';
 import { dispatchMilestone, sweepSlaBreaches } from '@/lib/comms/milestones';
 import { extractArchiveText, embedPendingChunks } from '@/lib/archive/ingest';
 import { runDraftGeneration } from '@/lib/documents/generate';
+import { purgeExpiredData } from '@/lib/privacy/retention';
 
 /**
  * Background worker process.
@@ -198,11 +199,27 @@ async function main(): Promise<void> {
     }),
   );
 
+  await boss.work(
+    JOBS.RETENTION_SWEEP,
+    handler<Record<string, never>>(JOBS.RETENTION_SWEEP, async () => {
+      const purged = await purgeExpiredData();
+      if (purged.enquiries > 0 || purged.messages > 0) {
+        console.log(
+          `[worker] retention: purged ${purged.enquiries} enquir(ies) and ${purged.messages} message(s)`,
+        );
+      }
+    }),
+  );
+
   // Recurring schedules. pg-boss stores these, so re-registering on each boot
   // updates rather than duplicates them.
   await boss.schedule(JOBS.EXPIRE_PROPOSALS, '*/15 * * * *', {}, { tz: 'Asia/Kuala_Lumpur' });
   await boss.schedule(JOBS.SLA_SWEEP, '0 8 * * 1-5', {}, { tz: 'Asia/Kuala_Lumpur' });
   await boss.schedule(JOBS.PRUNE_RATE_LIMITS, '0 3 * * *', {}, { tz: 'Asia/Kuala_Lumpur' });
+  // NFR-2.2. Weekly rather than nightly: the thresholds are 24 months and 7
+  // years, so nothing becomes overdue between Sundays, and a destructive sweep
+  // that runs less often is easier to reconcile against the audit log.
+  await boss.schedule(JOBS.RETENTION_SWEEP, '30 3 * * 0', {}, { tz: 'Asia/Kuala_Lumpur' });
 
   ready = true;
   console.log('[worker] handlers registered; awaiting jobs');

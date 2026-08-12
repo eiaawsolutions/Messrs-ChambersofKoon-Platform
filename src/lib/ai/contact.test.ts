@@ -1,11 +1,18 @@
 import { describe, expect, it } from 'vitest';
 import { extractContactDetails, scrubFreeText } from './tokenise';
 
-describe('extractContactDetails — the demo script message 5', () => {
-  const message = 'Nurul Aisyah binti Rahman. nurul.aisyah.demo@example.com. 012-555 0148.';
+/**
+ * Contact capture during intake (FR-2.4, AI-1).
+ *
+ * The firm needs the real email and phone number; the model must never see
+ * them. That only works if extraction runs before the scrub, which is the
+ * ordering these tests pin down.
+ */
+describe('extractContactDetails', () => {
+  const message = 'Nurul Aisyah binti Rahman. nurul.aisyah@example.com. 012-555 0148.';
 
   it('finds the email', () => {
-    expect(extractContactDetails(message).email).toBe('nurul.aisyah.demo@example.com');
+    expect(extractContactDetails(message).email).toBe('nurul.aisyah@example.com');
   });
 
   it('finds the Malaysian mobile number', () => {
@@ -14,7 +21,7 @@ describe('extractContactDetails — the demo script message 5', () => {
 
   it('runs before the scrub destroys the values', () => {
     // Order matters: scrubbing first would leave nothing to capture.
-    expect(scrubFreeText(message)).not.toContain('nurul.aisyah.demo@example.com');
+    expect(scrubFreeText(message)).not.toContain('nurul.aisyah@example.com');
   });
 
   it('handles common Malaysian formats', () => {

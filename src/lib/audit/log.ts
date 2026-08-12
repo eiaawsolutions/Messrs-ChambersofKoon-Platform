@@ -30,6 +30,10 @@ export const AUDIT_ACTIONS = {
   DOCUMENT_VIEW: 'document.view',
   DOCUMENT_DOWNLOAD: 'document.download',
   DOCUMENT_GENERATE: 'document.generate',
+  /** A lawyer's own amended file, uploaded back as the next version (FR-4.6). */
+  DOCUMENT_REVISE: 'document.revise',
+  /** A cited precedent excerpt pulled into a draft (FR-6.5). */
+  DOCUMENT_PRECEDENT_INSERT: 'document.precedent.insert',
   DOCUMENT_FINALISE: 'document.finalise',
   DOCUMENT_FINALISE_BLOCKED: 'document.finalise.blocked',
   TEMPLATE_UPLOAD: 'document.template.upload',
@@ -37,6 +41,10 @@ export const AUDIT_ACTIONS = {
   ENQUIRY_RECEIVED: 'enquiry.received',
   ENQUIRY_TRIAGED: 'enquiry.triaged',
   ENQUIRY_TRIAGE_OVERRIDE: 'enquiry.triage.override',
+  /** FR-2.8: a repeat from one address, or a volume no enquirer produces. */
+  ENQUIRY_FLAGGED: 'enquiry.flagged',
+  /** A held enquiry judged genuine and put back in the queue. */
+  ENQUIRY_RELEASED: 'enquiry.released',
 
   PROPOSAL_CREATED: 'proposal.created',
   PROPOSAL_ACCEPTED: 'proposal.accepted',
@@ -48,6 +56,8 @@ export const AUDIT_ACTIONS = {
   RAG_SEARCH: 'rag.search',
 
   MESSAGE_SEND: 'message.send',
+  /** FR-7.4: a client update deliberately withheld — a hold, not a failure. */
+  MESSAGE_SUPPRESSED: 'message.suppressed',
   MESSAGE_BOUNCED: 'message.bounced',
 
   PERMISSION_CHANGE: 'admin.permission.change',
@@ -62,6 +72,8 @@ export const AUDIT_ACTIONS = {
 
   CLIENT_DATA_EXPORT: 'privacy.client.export',
   CLIENT_DATA_ERASE: 'privacy.client.erase',
+  /** NFR-2.2: the nightly sweep, recorded only when it destroyed something. */
+  RETENTION_PURGE: 'privacy.retention.purge',
 } as const;
 
 export type AuditAction = (typeof AUDIT_ACTIONS)[keyof typeof AUDIT_ACTIONS];

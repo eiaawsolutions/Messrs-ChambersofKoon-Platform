@@ -6,7 +6,8 @@ import { can, getAuthorisedMatter } from '@/lib/auth/guard';
 import { PERMISSIONS } from '@/lib/auth/permissions';
 import { documentVersionList } from '@/lib/queries/matters';
 import { getDocumentHeader } from '@/lib/queries/documents';
-import { finaliseDocumentAction } from '../../matters/actions';
+import { REVISION_ERRORS, type RevisionErrorCode } from '@/lib/documents/revise';
+import { finaliseDocumentAction, reviseDocumentAction } from '../../matters/actions';
 
 export const metadata: Metadata = { title: 'Document' };
 export const dynamic = 'force-dynamic';
@@ -36,8 +37,15 @@ interface GenerationInputs {
  * version, prompt hash and the chunks cited. That trail is what makes an
  * AI-assisted draft defensible under professional-conduct review.
  */
-export default async function DocumentPage({ params }: { params: Promise<{ id: string }> }) {
+export default async function DocumentPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ id: string }>;
+  searchParams: Promise<{ denied?: string; revision?: string }>;
+}) {
   const { id } = await params;
+  const flags = await searchParams;
   const actor = await requireActor();
 
   const doc = await getDocumentHeader(actor, id);
@@ -48,9 +56,18 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
 
   const authorised = await getAuthorisedMatter(actor, doc.matterId);
   const mayFinalise = can(actor, PERMISSIONS.DOCUMENT_FINALISE, authorised ?? undefined);
+  const mayRevise = can(actor, PERMISSIONS.DOCUMENT_GENERATE, authorised ?? undefined);
 
   const latest = history.versions[0];
   const missing = ((latest?.generationInputs ?? {}) as GenerationInputs).missingDeterministic ?? [];
+
+  // Both banners are driven by a fixed code, never by reflected text.
+  const finaliseDenied = flags.denied === 'finalise';
+  const revisionSaved = flags.revision === 'saved';
+  const revisionError =
+    flags.revision && flags.revision in REVISION_ERRORS
+      ? REVISION_ERRORS[flags.revision as RevisionErrorCode]
+      : null;
 
   return (
     <div className="space-y-8">
@@ -69,6 +86,14 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
             </span>
           ) : null}
         </div>
+
+        {/* FR-6.5: search carries this draft with it, so a cited excerpt can be
+            pulled straight back in rather than copied by hand. */}
+        {mayRevise && doc.state !== 'final' && history.versions.length > 0 ? (
+          <Link href={`/precedent?document=${doc.id}`} className="btn btn-secondary mt-4">
+            Find precedent for this draft
+          </Link>
+        ) : null}
       </header>
 
       {history.versions.length === 0 ? (
@@ -104,14 +129,101 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
             </section>
           ) : null}
 
-          {mayFinalise && doc.state !== 'final' ? (
+          {finaliseDenied ? (
+            <section
+              aria-labelledby="denied"
+              role="alert"
+              className="rounded-sm border-l-2 border-l-red-500 bg-red-100 p-5"
+            >
+              <h2 id="denied" className="text-base font-semibold text-red-700">
+                Permission denied
+              </h2>
+              <p className="mt-2 text-sm text-red-700">
+                Finalising a document requires the Associate role or above. Your role is{' '}
+                <strong>{actor.roleName}</strong>. This attempt has been recorded in the audit log
+                and raised with the handling lawyer — you do not need to do anything further.
+              </p>
+            </section>
+          ) : null}
+
+          {revisionSaved ? (
+            <section
+              role="status"
+              className="rounded-sm border-l-2 border-l-green-500 bg-green-100 p-5"
+            >
+              <p className="text-sm text-green-700">
+                Revision saved as version {latest?.versionNo ?? ''}. It is now the current version.
+              </p>
+            </section>
+          ) : null}
+
+          {revisionError ? (
+            <section
+              role="alert"
+              className="rounded-sm border-l-2 border-l-amber-500 bg-amber-100 p-5"
+            >
+              <p className="text-sm text-amber-700">{revisionError}</p>
+            </section>
+          ) : null}
+
+          {/* FR-4.6: the round trip out to Word and back. Without this the
+              lawyer's amendments never enter the record and version history
+              describes only what the model wrote. */}
+          {mayRevise && doc.state !== 'final' ? (
+            <form action={reviseDocumentAction} className="surface-raised p-5">
+              <input type="hidden" name="documentId" value={doc.id} />
+              <input type="hidden" name="matterId" value={doc.matterId} />
+              <h2 className="text-base font-semibold">Upload your revision</h2>
+              <p className="text-ink-muted mt-2 text-sm">
+                Amended the draft in Word? Upload it here and it becomes the next version, recorded
+                against your name. The generated version is kept — nothing is overwritten.
+              </p>
+              <div className="mt-4 space-y-3">
+                <div>
+                  <label htmlFor="revision-file" className="text-ink block text-sm font-medium">
+                    Amended document (.docx)
+                  </label>
+                  <input
+                    id="revision-file"
+                    name="file"
+                    type="file"
+                    required
+                    accept=".docx,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                    className="mt-1 block w-full text-sm"
+                  />
+                </div>
+                <div>
+                  <label htmlFor="revision-note" className="text-ink block text-sm font-medium">
+                    What changed <span className="text-ink-faint font-normal">(optional)</span>
+                  </label>
+                  <input
+                    id="revision-note"
+                    name="note"
+                    type="text"
+                    maxLength={2000}
+                    placeholder="Reworded the grounds; corrected the marriage date"
+                    className="border-line mt-1 block w-full rounded-sm border px-3 py-2 text-sm"
+                  />
+                </div>
+              </div>
+              <button className="btn btn-secondary mt-4" type="submit">
+                Save as new version
+              </button>
+            </form>
+          ) : null}
+
+          {/* Shown regardless of permission. The server action re-authorises
+              and records the attempt; a hidden button teaches a pupil nothing
+              about why they cannot do this, and hiding is not the control. */}
+          {doc.state !== 'final' ? (
             <form action={finaliseDocumentAction} className="surface-raised p-5">
               <input type="hidden" name="documentId" value={doc.id} />
               <input type="hidden" name="matterId" value={doc.matterId} />
               <h2 className="text-base font-semibold">Finalise</h2>
               <p className="text-ink-muted mt-2 text-sm">
-                Download the current version, review and amend it in Word, then mark it final.
-                Finalisation is recorded in the audit log against your name.
+                {mayFinalise
+                  ? 'Review the current version, then mark it final. Finalisation is recorded in the audit log against your name.'
+                  : `Finalising requires the Associate role or above. Your role is ${actor.roleName}, so this will be refused and the attempt recorded.`}
               </p>
               <button className="btn btn-primary mt-4" type="submit">
                 Mark final
@@ -146,12 +258,22 @@ export default async function DocumentPage({ params }: { params: Promise<{ id: s
                           {fmt(version.createdAt)} · {version.createdBy ?? 'system'}
                         </p>
                       </div>
-                      <a
-                        className="btn btn-secondary flex-none"
-                        href={`/api/documents/${doc.id}/versions/${version.versionNo}/download`}
-                      >
-                        Download .docx
-                      </a>
+                      <div className="flex flex-none gap-2">
+                        {/* Reading the draft on screen, colour-coded by
+                            provenance, before committing to opening Word. */}
+                        <Link
+                          className="btn btn-primary"
+                          href={`/documents/${doc.id}/versions/${version.versionNo}/preview`}
+                        >
+                          Preview
+                        </Link>
+                        <a
+                          className="btn btn-secondary"
+                          href={`/api/documents/${doc.id}/versions/${version.versionNo}/download`}
+                        >
+                          Download .docx
+                        </a>
+                      </div>
                     </div>
 
                     {version.changeSummary ? (

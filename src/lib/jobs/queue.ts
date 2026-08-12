@@ -27,6 +27,8 @@ export const JOBS = {
   EMBED_CHUNKS: 'archive.embed-chunks',
   GENERATE_DRAFT: 'documents.generate-draft',
   PRUNE_RATE_LIMITS: 'ops.prune-rate-limits',
+  /** NFR-2.2: destroy what is past its retention date. */
+  RETENTION_SWEEP: 'ops.retention-sweep',
 } as const;
 
 export type JobName = (typeof JOBS)[keyof typeof JOBS];
@@ -56,6 +58,11 @@ const QUEUE_POLICY: Record<JobName, QueuePolicyConfig> = {
   [JOBS.EMBED_CHUNKS]: { retryLimit: 5, expireInSeconds: 900 },
   [JOBS.GENERATE_DRAFT]: { retryLimit: 3, expireInSeconds: 900 },
   [JOBS.PRUNE_RATE_LIMITS]: { retryLimit: 2, expireInSeconds: 120 },
+  // One retry only. A sweep that failed halfway has already committed its
+  // first statement; retrying it repeatedly against a struggling database is
+  // how a destructive job turns an outage into a longer one. It runs weekly —
+  // the next pass picks up whatever this one missed.
+  [JOBS.RETENTION_SWEEP]: { retryLimit: 1, expireInSeconds: 900 },
 };
 
 let bossInstance: PgBoss | null = null;

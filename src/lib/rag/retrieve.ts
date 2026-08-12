@@ -150,7 +150,8 @@ async function rewriteQuery(
   }
 }
 
-interface RawRow extends Record<string, unknown> {
+/** Columns both the ranked search and the single-chunk read select. */
+interface ChunkRow extends Record<string, unknown> {
   chunk_id: string;
   text: string;
   locator: string | null;
@@ -162,8 +163,94 @@ interface RawRow extends Record<string, unknown> {
   source_id: string;
   source_filename: string | null;
   document_date: Date | null;
+}
+
+interface RawRow extends ChunkRow {
   score: number;
   matched_by: string;
+}
+
+/** A single chunk, re-read under the caller's own scope. See `permittedChunk`. */
+export interface PermittedChunk {
+  chunkId: string;
+  text: string;
+  locator: string | null;
+  matterId: string | null;
+  matterReference: string | null;
+  practiceArea: PracticeArea | null;
+  office: Office | null;
+  sourceType: 'archive_file' | 'document_version';
+  sourceId: string;
+  sourceFilename: string | null;
+  documentDate: Date | null;
+  /** True when identifiers were masked for this caller (PRD §2.2). */
+  masked: boolean;
+}
+
+/**
+ * Re-read one chunk under the caller's own permission scope (FR-6.2, FR-6.5).
+ *
+ * Insert-to-draft posts a chunk id, and a chunk id is guessable. The excerpt
+ * text is therefore never taken from the request — it is read back here through
+ * the *same* `scopePredicate` that governs search, so a chunk the caller could
+ * not have retrieved cannot be laundered into a document they can open. That is
+ * the whole reason this function exists rather than the action trusting the
+ * form.
+ *
+ * Returns null both when the chunk does not exist and when it is out of scope,
+ * so the caller cannot tell the two apart (IDOR hardening).
+ */
+export async function permittedChunk(
+  actor: Actor,
+  chunkId: string,
+): Promise<PermittedChunk | null> {
+  const scope = grantedScope(actor, PERMISSIONS.RAG_SEARCH);
+  if (scope === null) return null;
+
+  const scopeSql = scopePredicate(actor, scope);
+
+  const rows = await db.execute<ChunkRow>(sql`
+    select
+      c.id as chunk_id,
+      c.text,
+      c.locator,
+      c.matter_id,
+      m.reference as matter_reference,
+      c.practice_area,
+      c.office,
+      c.source_type,
+      c.source_id,
+      af.original_filename as source_filename,
+      c.document_date
+    from chunks c
+    left join matters m on m.id = c.matter_id
+    left join archive_files af
+      on c.source_type = 'archive_file' and af.id = c.source_id
+    where c.id = ${chunkId} and (${scopeSql})
+    limit 1
+  `);
+
+  const row = rows.rows[0];
+  if (!row) return null;
+
+  const masked = actor.masksClientIdentifiers;
+
+  return {
+    chunkId: row.chunk_id,
+    // Masked exactly as it was on screen, so what a pupil inserts is what a
+    // pupil read — the platform never hands them text they were not shown.
+    text: masked ? maskExcerpt(row.text) : row.text,
+    locator: row.locator,
+    matterId: row.matter_id,
+    matterReference: row.matter_reference,
+    practiceArea: row.practice_area,
+    office: row.office,
+    sourceType: row.source_type,
+    sourceId: row.source_id,
+    sourceFilename: row.source_filename,
+    documentDate: row.document_date,
+    masked,
+  };
 }
 
 export async function retrievePrecedent(params: {

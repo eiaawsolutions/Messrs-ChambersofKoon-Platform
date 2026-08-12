@@ -39,6 +39,16 @@ export default async function AdminLayout({ children }: { children: React.ReactN
       label: 'Feature access',
       show: can(actor, PERMISSIONS.ADMIN_FEATURES_MANAGE),
     },
+    {
+      href: '/admin/operations',
+      label: 'Operations',
+      show: can(actor, PERMISSIONS.AUDIT_VIEW),
+    },
+    {
+      href: '/admin/privacy',
+      label: 'Data requests',
+      show: can(actor, PERMISSIONS.PRIVACY_MANAGE),
+    },
   ].filter((tab) => tab.show);
 
   if (tabs.length === 0) {

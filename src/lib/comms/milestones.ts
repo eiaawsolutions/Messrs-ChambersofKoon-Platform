@@ -33,18 +33,73 @@ export interface MilestoneOutcome {
   messageId?: string;
 }
 
-/** FR-7.4: per-matter hold and per-stage suppression. */
-async function isSuppressed(matterId: string, stage: string): Promise<string | null> {
-  const [matter] = await db
-    .select({ commsHold: matters.commsHold })
-    .from(matters)
-    .where(eq(matters.id, matterId))
-    .limit(1);
+export type SuppressionSource = 'recorded_suppressed' | 'matter_hold' | 'stage_suppression';
 
-  if (matter?.commsHold) return 'matter is on communications hold';
+export interface Suppression {
+  source: SuppressionSource;
+  reason: string;
+}
 
-  const [suppression] = await db
-    .select({ id: messageSuppressions.id, stage: messageSuppressions.stage })
+/** `messages.subject` is varchar(300). */
+export const SUBJECT_MAX = 300;
+
+/**
+ * FR-7.4: decide whether a recorded stage reaches the client, and name the
+ * decision that stopped it. Pure — the caller reads the three inputs — so the
+ * precedence is provable without standing up a matter.
+ *
+ * Most-specific first: a clerk suppressing this one event says more about it
+ * than a standing hold over the whole matter does.
+ */
+export function classifySuppression(params: {
+  eventSuppressed?: boolean | null;
+  commsHold?: boolean | null;
+  stageSuppressed?: boolean;
+}): Suppression | null {
+  if (params.eventSuppressed) {
+    return { source: 'recorded_suppressed', reason: 'suppressed at the point of recording' };
+  }
+  if (params.commsHold) {
+    return { source: 'matter_hold', reason: 'matter is on communications hold' };
+  }
+  if (params.stageSuppressed) {
+    return { source: 'stage_suppression', reason: 'stage is suppressed on this matter' };
+  }
+  return null;
+}
+
+/**
+ * The row a withheld update leaves behind. It answers the three things a
+ * withholding is challenged on later: who it was for, what would have been
+ * sent, and why it was not.
+ *
+ * `error` stays null on purpose — the matter page renders that column in the
+ * danger colour, and a hold carried out as instructed is not a fault.
+ */
+export function withheldMessageContent(params: {
+  reason: string;
+  clientEmail?: string | null;
+  templateKey?: string | null;
+}): {
+  toEmail: string;
+  templateKey: string | null;
+  subject: string;
+  bodyRendered: string;
+  error: null;
+} {
+  return {
+    toEmail: params.clientEmail ?? '',
+    templateKey: params.templateKey ?? null,
+    subject: `Withheld — ${params.reason}`.slice(0, SUBJECT_MAX),
+    bodyRendered: '',
+    error: null,
+  };
+}
+
+/** FR-7.4: a per-stage suppression, or one covering every stage (`stage` null). */
+async function stageIsSuppressed(matterId: string, stage: string): Promise<boolean> {
+  const [row] = await db
+    .select({ id: messageSuppressions.id })
     .from(messageSuppressions)
     .where(
       and(
@@ -54,7 +109,56 @@ async function isSuppressed(matterId: string, stage: string): Promise<string | n
     )
     .limit(1);
 
-  return suppression ? 'stage is suppressed on this matter' : null;
+  return Boolean(row);
+}
+
+/**
+ * Record that an update was withheld. FR-1.8 treats the decision not to write
+ * to a client as auditable in its own right: a send leaves a `message.send`
+ * entry, so a withholding leaves `message.suppressed` rather than silence.
+ */
+async function recordWithheld(params: {
+  matterId: string;
+  stage: string;
+  suppression: Suppression;
+  clientEmail: string | null;
+  templateKey: string | null;
+  idempotencyKey: string;
+}): Promise<MilestoneOutcome> {
+  const content = withheldMessageContent({
+    reason: params.suppression.reason,
+    clientEmail: params.clientEmail,
+    templateKey: params.templateKey,
+  });
+
+  const [row] = await db
+    .insert(messages)
+    .values({
+      matterId: params.matterId,
+      state: 'suppressed',
+      idempotencyKey: params.idempotencyKey,
+      ...content,
+    })
+    .onConflictDoNothing()
+    .returning({ id: messages.id });
+
+  // A job retry that lost the race must not write a second audit entry.
+  if (row) {
+    await audit({
+      action: AUDIT_ACTIONS.MESSAGE_SUPPRESSED,
+      entityType: 'message',
+      entityId: row.id,
+      matterId: params.matterId,
+      metadata: {
+        stage: params.stage,
+        source: params.suppression.source,
+        reason: params.suppression.reason,
+        templateKey: params.templateKey,
+      },
+    });
+  }
+
+  return { sent: false, reason: params.suppression.reason, messageId: row?.id };
 }
 
 /**
@@ -78,7 +182,6 @@ export async function dispatchMilestone(statusEventId: string): Promise<Mileston
     .limit(1);
 
   if (!event) return { sent: false, reason: 'status event not found' };
-  if (event.suppressed) return { sent: false, reason: 'suppressed at the point of recording' };
 
   const idempotencyKey = `milestone-${event.id}`;
 
@@ -95,28 +198,14 @@ export async function dispatchMilestone(statusEventId: string): Promise<Mileston
     };
   }
 
-  const suppressedReason = await isSuppressed(event.matterId, event.stage);
-  if (suppressedReason) {
-    await db
-      .insert(messages)
-      .values({
-        matterId: event.matterId,
-        toEmail: '',
-        templateKey: null,
-        subject: '(suppressed)',
-        bodyRendered: '',
-        state: 'suppressed',
-        idempotencyKey,
-      })
-      .onConflictDoNothing();
-    return { sent: false, reason: suppressedReason };
-  }
-
+  // The matter and stage are read before the suppression branch: a withheld
+  // update still has to record who it was for and what would have been sent.
   const [matter] = await db
     .select({
       id: matters.id,
       reference: matters.reference,
       practiceArea: matters.practiceArea,
+      commsHold: matters.commsHold,
       clientName: clients.fullName,
       clientEmail: clients.email,
       lawyerName: users.fullName,
@@ -129,15 +218,6 @@ export async function dispatchMilestone(statusEventId: string): Promise<Mileston
     .limit(1);
 
   if (!matter) return { sent: false, reason: 'matter not found' };
-  if (!matter.clientEmail) {
-    await raiseException({
-      matterId: matter.id,
-      kind: 'missing_client_email',
-      title: `No client email on ${matter.reference}`,
-      detail: `Stage "${event.stage}" was recorded but the client has no email address, so no update could be sent.`,
-    });
-    return { sent: false, reason: 'client has no email address' };
-  }
 
   const [stage] = await db
     .select({
@@ -152,6 +232,35 @@ export async function dispatchMilestone(statusEventId: string): Promise<Mileston
       ),
     )
     .limit(1);
+
+  // `??` short-circuits, so an already-decided hold spares the extra query.
+  const suppression =
+    classifySuppression({ eventSuppressed: event.suppressed, commsHold: matter.commsHold }) ??
+    classifySuppression({ stageSuppressed: await stageIsSuppressed(matter.id, event.stage) });
+
+  if (suppression) {
+    return recordWithheld({
+      matterId: matter.id,
+      stage: event.stage,
+      suppression,
+      clientEmail: matter.clientEmail,
+      templateKey: stage?.messageTemplateKey ?? null,
+      idempotencyKey,
+    });
+  }
+
+  // Checked after suppression on purpose: a matter that was deliberately
+  // silenced should not also raise a task about an address it was never
+  // going to use.
+  if (!matter.clientEmail) {
+    await raiseException({
+      matterId: matter.id,
+      kind: 'missing_client_email',
+      title: `No client email on ${matter.reference}`,
+      detail: `Stage "${event.stage}" was recorded but the client has no email address, so no update could be sent.`,
+    });
+    return { sent: false, reason: 'client has no email address' };
+  }
 
   if (!stage?.messageTemplateKey) {
     return { sent: false, reason: 'stage has no client-facing template' };

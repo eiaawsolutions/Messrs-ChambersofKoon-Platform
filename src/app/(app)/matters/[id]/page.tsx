@@ -146,7 +146,9 @@ export default async function MatterPage({ params }: { params: Promise<{ id: str
                     <p className="text-ink text-sm font-medium">
                       {event.label ?? event.stage.replace(/_/g, ' ')}
                       {event.suppressed ? (
-                        <span className="pill pill-warning ml-2">no client email</span>
+                        // The flag records "do not email the client about this
+                        // one" — a decision someone took, not a missing address.
+                        <span className="pill pill-warning ml-2">client not emailed</span>
                       ) : null}
                     </p>
                     {event.notes ? (

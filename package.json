@@ -23,14 +23,13 @@
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx --conditions=react-server src/lib/db/migrate.ts",
     "db:seed": "tsx --conditions=react-server src/lib/db/seed.ts",
+    "seed:templates": "tsx --conditions=react-server scripts/seed-templates.ts",
     "grant:admin": "tsx --conditions=react-server scripts/grant-admin.ts",
     "db:studio": "drizzle-kit studio",
     "widget:build": "tsx scripts/build-widget.ts",
     "release": "node scripts/start.mjs",
     "verify": "npm run format:check && npm run lint && npm run typecheck && npm run test",
-    "prepare": "lefthook install || true",
-    "seed:demo": "tsx --conditions=react-server scripts/seed-demo.ts",
-    "demo:reset": "tsx --conditions=react-server scripts/reset-demo.ts"
+    "prepare": "lefthook install || true"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.116.0",

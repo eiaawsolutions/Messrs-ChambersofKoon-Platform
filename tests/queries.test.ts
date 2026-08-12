@@ -24,6 +24,11 @@ import {
 } from '@/lib/queries/dashboard';
 import { auditActionOptions, auditCsv, listAuditEvents } from '@/lib/queries/audit';
 import { activeTemplatesFor } from '@/lib/queries/documents';
+import { operationsSnapshot } from '@/lib/queries/operations';
+import { heldEnquiries } from '@/lib/intake/duplicate-check';
+import { retentionDue } from '@/lib/privacy/retention';
+import { exportClientData, searchClients } from '@/lib/privacy/subject-request';
+import { listSavedSearches } from '@/lib/rag/saved-searches';
 import {
   listAvailability,
   listFeatureFlags,
@@ -91,6 +96,73 @@ describe('dashboard read models execute', () => {
   });
   it('enquiriesNeedingReview', async () => {
     await expect(enquiriesNeedingReview(actor)).resolves.toBeInstanceOf(Array);
+  });
+
+  it('the per-office view executes for every office (FR-8.5)', async () => {
+    for (const office of ['KL', 'PJ', 'IPOH'] as const) {
+      await expect(pendingProposalsFor(actor, office)).resolves.toBeInstanceOf(Array);
+      await expect(enquiriesNeedingReview(actor, office)).resolves.toBeInstanceOf(Array);
+      await expect(needsHumanReviewCount(actor, office)).resolves.toBeTypeOf('number');
+    }
+  });
+
+  it('the enquiry scope predicate executes at every scope', async () => {
+    // The office branch adds a practice-area disjunction over enquiries, which
+    // is a different table from the one matterScopeFilter reads.
+    for (const scope of ['all', 'office', 'own'] as const) {
+      const scoped: Actor = {
+        ...actor,
+        practiceAreas: scope === 'office' ? ['family_matrimonial'] : null,
+        grants: { ...actor.grants, 'intake.view': scope, 'proposal.decide': scope },
+      };
+      await expect(enquiriesNeedingReview(scoped)).resolves.toBeInstanceOf(Array);
+      await expect(pendingProposalsFor(scoped)).resolves.toBeInstanceOf(Array);
+    }
+  });
+
+  it('heldEnquiries (FR-2.8)', async () => {
+    await expect(heldEnquiries()).resolves.toBeInstanceOf(Array);
+  });
+});
+
+describe('operations and privacy read models execute', () => {
+  /*
+   * These carry the most hand-written SQL in the project — a generated date
+   * series, aggregate FILTER clauses and five scalar subqueries in one
+   * statement. None of it is checked by tsc.
+   */
+  it('operationsSnapshot (NFR-4.3)', async () => {
+    const snapshot = await operationsSnapshot();
+
+    // 14 days, gaps filled. A shorter array means the generated series was
+    // dropped and quiet days are silently missing from the chart.
+    expect(snapshot.enquiriesPerDay).toHaveLength(14);
+    expect(snapshot.enquiriesPerDay.every((d) => /^\d{4}-\d{2}-\d{2}$/.test(d.day))).toBe(true);
+    expect(snapshot.enquiriesPerDay.every((d) => Number.isFinite(d.count))).toBe(true);
+    expect(snapshot.proposalsPending).toBeTypeOf('number');
+    expect(snapshot.email30d.bounced).toBeTypeOf('number');
+    expect(snapshot.aiSpend.monthToDateUsd).toBeTypeOf('number');
+  });
+
+  it('retentionDue (NFR-2.2)', async () => {
+    const due = await retentionDue();
+    expect(due.enquiries).toBeTypeOf('number');
+    expect(due.messages).toBeTypeOf('number');
+  });
+
+  it('searchClients, with and without a term (NFR-2.3)', async () => {
+    await expect(searchClients('')).resolves.toBeInstanceOf(Array);
+    await expect(searchClients('tan')).resolves.toBeInstanceOf(Array);
+  });
+
+  it('exportClientData returns null for an unknown client', async () => {
+    await expect(
+      exportClientData({ actor, clientId: '00000000-0000-0000-0000-0000000000ff' }),
+    ).resolves.toBeNull();
+  });
+
+  it('listSavedSearches (FR-8.5)', async () => {
+    await expect(listSavedSearches(actor)).resolves.toBeInstanceOf(Array);
   });
 });
 

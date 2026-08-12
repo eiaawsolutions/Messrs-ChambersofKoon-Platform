@@ -395,6 +395,82 @@
     -webkit-overflow-scrolling: touch;
   }
 
+  /* --- Colour-coded draft preview ---------------------------------------
+     Two provenances, two colours, no third. Navy is the firm's own text —
+     its precedent wording and the deterministic values taken from matter
+     data. Amber is what the model drafted for this version. Clay is a gap
+     the platform refused to fill.
+
+     Colour is never the only signal: AI runs carry an underline and are
+     marked up as <mark>, the gaps are dotted, and the panel beside the
+     document names every drafted section in words. */
+
+  .draft-sheet {
+    background: var(--color-paper-raised);
+    border: 1px solid var(--color-line);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-raise);
+    padding: clamp(1.5rem, 4vw, 3.5rem);
+    font-family: var(--font-display);
+    font-size: 1.0625rem;
+    line-height: 1.75;
+  }
+
+  .draft-p {
+    margin-block: 0 0.85rem;
+    white-space: pre-wrap;
+    text-wrap: pretty;
+  }
+  .draft-p:last-child {
+    margin-bottom: 0;
+  }
+  /* An empty paragraph is spacing in the original document; keep it. */
+  .draft-p:empty::after {
+    content: '\00a0';
+  }
+
+  .draft-p-strong {
+    font-weight: 600;
+    letter-spacing: 0.01em;
+  }
+
+  .draft-template {
+    color: var(--color-navy-700);
+  }
+
+  .draft-ai {
+    background: var(--color-amber-100);
+    color: var(--color-amber-700);
+    box-shadow: inset 0 -1px 0 var(--color-brass-300);
+    border-radius: 2px;
+    padding-block: 0.05em;
+  }
+
+  .draft-missing {
+    background: var(--color-clay-100);
+    color: var(--color-clay-700);
+    border-bottom: 1px dotted var(--color-clay-500);
+    font-family: var(--font-mono);
+    font-size: 0.85em;
+    padding-inline: 0.15em;
+  }
+
+  /* Swatch used in the legend and the block list. */
+  .draft-key {
+    display: inline-block;
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 2px;
+    flex: none;
+  }
+
+  @media print {
+    .draft-ai {
+      box-shadow: none;
+      border-bottom: 1px solid var(--color-brass-500);
+    }
+  }
+
   /* --- Screen-reader only ----------------------------------------------- */
   .sr-only {
     position: absolute;

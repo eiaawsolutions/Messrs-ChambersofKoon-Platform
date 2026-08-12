@@ -103,7 +103,7 @@ See [`docs/runbook.md`](docs/runbook.md) for the deployment procedure.
 ## Testing
 
 ```bash
-npm run test        # 90 unit + integration tests
+npm run test        # 418 unit + integration tests
 npm run evals       # AI eval suite (needs ANTHROPIC_API_KEY; costs money)
 ```
 
@@ -123,7 +123,18 @@ Stated plainly so they are decisions, not surprises:
 4. **Firm precedent templates are required** before document generation produces anything useful. They are a blocking discovery item in the PRD (§11). The template parser, placeholder mapping and assembly are built and waiting.
 5. **Turnstile is off.** `TURNSTILE_ENABLED=false` and no site key is registered. The origin allow-list and rate limiter are active. Turn it on before go-live.
 6. **`.ics` rendering has not been verified in Gmail, Outlook and Apple Mail.** The wire format is asserted by 26 tests, but AT-03 requires a human to accept an invitation in all three clients at UAT.
-7. **Client reschedule link (FR-3.8) is not built.** It is a SHOULD, not a MUST. The token column and hash are in place; the public route is not.
+7. **Bahasa Malaysia is not translated.** The catalogue (`src/lib/i18n/catalogue.ts`) carries every client-facing string and the `ms-MY` entry is deliberately empty — machine-translating a firm's client correspondence into a language nobody on the delivery team can check is not a thing to ship. Adding it is one object, no code change (NFR-5.2). The staff dashboard is English by decision, not omission; see the module comment.
+8. **Retention destroys nothing until the firm confirms the policy.** The sweep is written, scheduled weekly and audited, and `/admin/privacy` shows what the next pass would remove — read that number before the first run in production.
+
+## Client-facing surfaces
+
+Two of the three run without a login, so they are listed together rather than left to be discovered:
+
+| Route                 | Who reaches it                             | Notes                                                                                                                                |
+| --------------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `/enquiry`            | Anyone. Linkable; the widget's JS fallback | Server-rendered, no client bundle (FR-2.2)                                                                                           |
+| `/reschedule/{token}` | The token in a confirmation email only     | Creates a proposal for lawyer approval; never books, never emails the client (FR-3.8)                                                |
+| `/preview/widget`     | The firm, before go-live                   | The real widget on a mock firm page — enquiries made here are real. See [`docs/website-integration.md`](docs/website-integration.md) |
 
 ## Repository layout
 
@@ -136,8 +147,10 @@ src/
     auth/         guard.ts is the single authorisation path
     queries/      read models; every function takes an Actor
     ai/           prompts (versioned + hashed), model routing, tokenisation
-    rag/          chunking, embedding, hybrid retrieval
-    documents/    docx template parsing and assembly
+    rag/          chunking, embedding, hybrid retrieval, saved searches
+    documents/    docx template parsing, assembly, revision and edit signals
+    i18n/         client-facing message catalogue (NFR-5.2)
+    privacy/      retention sweep, data subject export and erasure
     scheduling/   slot engine (pure) + service (database-backed)
     email/        RFC 5545 builder, Resend transport
     comms/        milestone dispatch, delivery write-back

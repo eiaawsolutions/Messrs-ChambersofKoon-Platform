@@ -7,6 +7,7 @@ import { loadProposalForDecision } from '@/lib/queries/dashboard';
 import { assertCan, getAuthorisedMatter } from '@/lib/auth/guard';
 import { PERMISSIONS } from '@/lib/auth/permissions';
 import { acceptProposal, declineProposal, rescheduleProposal } from '@/lib/scheduling/service';
+import { releaseHeldEnquiry } from '@/lib/intake/duplicate-check';
 import { enqueue, JOBS } from '@/lib/jobs/queue';
 import { audit, AUDIT_ACTIONS } from '@/lib/audit/log';
 import { requestContext } from '@/lib/auth/session';
@@ -120,6 +121,24 @@ export async function retriageEnquiryAction(formData: FormData): Promise<void> {
   });
 
   revalidatePath('/intake');
+}
+
+/**
+ * FR-2.8: put a held enquiry back in front of a human.
+ *
+ * Gated on INTAKE_TRIAGE, the same permission as correcting a classification —
+ * because that is what this is. Deciding a flagged enquiry is genuine is a
+ * triage judgement, and the audit records who made it.
+ */
+export async function releaseEnquiryAction(formData: FormData): Promise<void> {
+  const { enquiryId } = retriageSchema.parse({ enquiryId: formData.get('enquiryId') });
+  const actor = await requireActor();
+  assertCan(actor, PERMISSIONS.INTAKE_TRIAGE);
+
+  await releaseHeldEnquiry({ actor, enquiryId });
+
+  revalidatePath('/intake');
+  revalidatePath('/dashboard');
 }
 
 /** Manually propose a slot for an enquiry a human has corrected. */

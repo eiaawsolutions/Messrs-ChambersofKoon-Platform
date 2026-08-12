@@ -118,6 +118,18 @@ function humanise(tag: string): string {
     .replace(/^\w/, (c) => c.toUpperCase());
 }
 
+/**
+ * The one way a placeholder is named to a human.
+ *
+ * Exported so the draft preview labels its AI blocks with exactly the wording
+ * the schema, the missing-field checklist and the change summary already use.
+ * A block called "Grounds of petition" in one screen and "groundsOfPetition"
+ * in another reads as two different things.
+ */
+export function humaniseTag(tag: string): string {
+  return humanise(tag.startsWith(AI_PREFIX) ? tag.slice(AI_PREFIX.length) : tag);
+}
+
 /** Best-guess mapping from placeholder name to matter-data path. */
 function inferSource(tag: string): string | undefined {
   const map: Record<string, string> = {

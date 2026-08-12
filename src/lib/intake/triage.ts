@@ -1,8 +1,13 @@
 import 'server-only';
 import { eq, desc, sql } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
-import { enquiries, enquiryMessages } from '@/lib/db/schema';
+import { enquiries, enquiryMessages, type PracticeArea } from '@/lib/db/schema';
 import { isResumable } from '@/lib/intake/session';
+import {
+  enquiryTypeById,
+  isMismatched,
+  practiceAreaForEnquiryType,
+} from '@/lib/intake/enquiry-types';
 import { generateStructured, generateText, AiSchemaError } from '@/lib/ai/client';
 import { INTAKE_SYSTEM, INTAKE_BRIEF_SYSTEM, wrapUntrusted } from '@/lib/ai/prompts';
 import { caseBriefJsonSchema, caseBriefSchema, type CaseBrief } from '@/lib/ai/schemas';
@@ -30,6 +35,19 @@ import { audit, AUDIT_ACTIONS } from '@/lib/audit/log';
 /** Below this, the enquiry goes to a human instead of proposing a slot (FR-2.6). */
 export const CONFIDENCE_THRESHOLD = 60;
 
+/**
+ * The percentage a lawyer reads at a glance.
+ *
+ * The number stays on screen beside it — a band alone would hide the
+ * difference between 61% and 94%, and 61% is a materially different thing to
+ * hand a fee earner even though both clear the threshold.
+ */
+export function confidenceBand(confidence: number): 'High' | 'Medium' | 'Low' {
+  if (confidence >= 85) return 'High';
+  if (confidence >= CONFIDENCE_THRESHOLD) return 'Medium';
+  return 'Low';
+}
+
 /** A conversation this long is either abuse or a person who needs a human. */
 const MAX_TURNS = 24;
 
@@ -46,24 +64,51 @@ const FORCE_BRIEF_AFTER_EXCHANGES = 6;
 /**
  * Has the conversation reached the point of handing over to a lawyer?
  *
- * Three ways to be done, in order of strength:
+ * The firm's website form would not submit without a name, an email, a contact
+ * number and an enquiry type, and the widget now opens with that same form —
+ * so for any enquiry started since, all four are on file before the first
+ * word. `detailsOnFile` says so, and it changes what "finished" means: the
+ * only thing outstanding is the facts, so the moment the agent stops asking,
+ * there is nothing left to hold the person for.
  *
- *  1. **Contact details are on file** after a few exchanges. Someone who has
- *     given their name and a way to reach them has finished telling their
- *     story; continuing to interrogate is how people abandon an enquiry. A
- *     lawyer can ask the rest at the consultation — that is what it is for.
- *  2. The agent stopped asking questions, as the prompt instructs.
- *  3. The hard cap, so a chatty model cannot trap anyone in a loop.
+ * The graduated rules below still apply to everything else — enquiries opened
+ * before the form existed, and anything a member of staff enters by hand —
+ * where contact details have to be recovered from the conversation itself:
+ *
+ *  1. **Both ways to reach them.** The conversation now holds what the form
+ *     would have captured. Continuing to interrogate is how people abandon an
+ *     enquiry; a lawyer can ask the rest at the consultation.
+ *  2. **One way only.** Hold on for a turn so the agent can ask for the other,
+ *     then close anyway. Pressing twice loses the enquiry entirely, and an
+ *     enquiry with one channel is worth more than none.
+ *  3. The agent stopped asking questions, as the prompt instructs.
+ *  4. The hard cap, so a chatty model cannot trap anyone in a loop.
+ *
+ * The name is not checked here because it cannot be reliably detected mid
+ * conversation — it is enforced on the brief, where a model reading the whole
+ * transcript can tell whether one was given.
  */
-function looksComplete(params: {
+export function looksComplete(params: {
   reply: string;
   exchanges: number;
-  hasContactDetails: boolean;
+  hasEmail: boolean;
+  hasPhone: boolean;
+  /** The opening form supplied name, email, number and type up front. */
+  detailsOnFile?: boolean;
 }): boolean {
   if (params.exchanges >= FORCE_BRIEF_AFTER_EXCHANGES) return true;
-  if (params.hasContactDetails && params.exchanges >= 4) return true;
 
   const asksAQuestion = /\?\s*$/.test(params.reply.trim());
+
+  // Nothing is outstanding but the facts, and the agent has just said it has
+  // them. Holding for another round would be asking a question we do not need
+  // the answer to — which is exactly how a form that already worked gets a
+  // reputation for being slower than an email.
+  if (params.detailsOnFile && !asksAQuestion && params.exchanges >= 2) return true;
+
+  if (params.hasEmail && params.hasPhone && params.exchanges >= 4) return true;
+  if ((params.hasEmail || params.hasPhone) && params.exchanges >= 5) return true;
+
   return !asksAQuestion && params.exchanges >= 3;
 }
 
@@ -88,25 +133,48 @@ export async function respondToTurn(params: {
     };
   }
 
-  // Capture contact details from the raw message before the scrub destroys
-  // them, then store them on the enquiry. The model only ever sees the
-  // placeholder (AI-1); the firm keeps the real value.
-  const contact = extractContactDetails(params.userMessage);
-  if (contact.email || contact.phone) {
-    const patch: Record<string, string> = {};
-    if (contact.email) patch.contactEmail = contact.email;
-    if (contact.phone) patch.contactPhone = contact.phone;
-    await db.update(enquiries).set(patch).where(eq(enquiries.id, params.enquiryId));
-  }
-
   const [enquiryRow] = await db
-    .select({ email: enquiries.contactEmail, phone: enquiries.contactPhone })
+    .select({
+      name: enquiries.contactName,
+      email: enquiries.contactEmail,
+      phone: enquiries.contactPhone,
+      enquiryTypeSelected: enquiries.enquiryTypeSelected,
+    })
     .from(enquiries)
     .where(eq(enquiries.id, params.enquiryId))
     .limit(1);
-  const hasContactDetails = Boolean(
-    contact.email || contact.phone || enquiryRow?.email || enquiryRow?.phone,
+
+  /**
+   * Read from the enquiry rather than taken from the caller.
+   *
+   * The opening form writes all four before the first turn, so the row is
+   * authoritative and stays right on turn five — where a flag passed in by the
+   * route handler would already have been lost. It is also not something an
+   * unauthenticated caller should be able to assert about their own enquiry.
+   */
+  const detailsOnFile = Boolean(
+    enquiryRow?.name && enquiryRow.email && enquiryRow.phone && enquiryRow.enquiryTypeSelected,
   );
+
+  // Capture contact details from the raw message before the scrub destroys
+  // them, then store them on the enquiry. The model only ever sees the
+  // placeholder (AI-1); the firm keeps the real value.
+  //
+  // Only ever fills a blank. Since the opening form became mandatory the
+  // enquiry already holds a validated, normalised address and number, and the
+  // addresses that appear later in a transcript are usually somebody else's —
+  // an ex-spouse's email, the other side's solicitor. Overwriting on sight
+  // would quietly redirect the firm's reply to the opposing party.
+  const contact = extractContactDetails(params.userMessage);
+  const patch: Record<string, string> = {};
+  if (contact.email && !enquiryRow?.email) patch.contactEmail = contact.email;
+  if (contact.phone && !enquiryRow?.phone) patch.contactPhone = contact.phone;
+  if (Object.keys(patch).length > 0) {
+    await db.update(enquiries).set(patch).where(eq(enquiries.id, params.enquiryId));
+  }
+
+  const hasEmail = Boolean(enquiryRow?.email ?? contact.email);
+  const hasPhone = Boolean(enquiryRow?.phone ?? contact.phone);
 
   const cleaned = scrubFreeText(params.userMessage).slice(0, 4000);
 
@@ -154,7 +222,9 @@ export async function respondToTurn(params: {
     readyForBrief: looksComplete({
       reply,
       exchanges: Math.floor(turnCount / 2),
-      hasContactDetails,
+      hasEmail,
+      hasPhone,
+      detailsOnFile,
     }),
   };
 }
@@ -183,6 +253,13 @@ export async function buildCaseBrief(enquiryId: string): Promise<TriageOutcome> 
   if (transcript.length === 0) {
     throw new Error(`Enquiry ${enquiryId} has no conversation to summarise`);
   }
+
+  const [selection] = await db
+    .select({ enquiryTypeSelected: enquiries.enquiryTypeSelected })
+    .from(enquiries)
+    .where(eq(enquiries.id, enquiryId))
+    .limit(1);
+  const selectedType = selection?.enquiryTypeSelected ?? null;
 
   const rendered = transcript
     .map((m) => `${m.role === 'assistant' ? 'Assistant' : 'Enquirer'}: ${m.content}`)
@@ -216,6 +293,19 @@ export async function buildCaseBrief(enquiryId: string): Promise<TriageOutcome> 
 
   const brief = result.data;
 
+  // A person who picked "Property & Land" from the firm's own list has told us
+  // something the classifier just failed to extract. Prefer their answer over
+  // `general`, which routes nowhere: no availability rule and no template is
+  // scoped to it. Only `general` is overridden — a specific classification
+  // that disagrees with the selection is a real disagreement, and gets shown
+  // to a lawyer rather than quietly resolved either way.
+  const practiceArea =
+    brief.practiceArea === 'general'
+      ? (practiceAreaForEnquiryType(selectedType) ?? brief.practiceArea)
+      : brief.practiceArea;
+
+  const mismatched = isMismatched(selectedType, practiceArea);
+
   // FR-2.6 and the safety escalation both route to a human rather than
   // proposing a slot. A safety concern needs a person, not a calendar entry.
   const lowConfidence = brief.confidence < CONFIDENCE_THRESHOLD;
@@ -229,7 +319,11 @@ export async function buildCaseBrief(enquiryId: string): Promise<TriageOutcome> 
         ? 'Conversation ended before the basics were gathered'
         : 'Ready to propose a consultation slot';
 
-  const briefMarkdown = renderBriefMarkdown(brief);
+  const briefMarkdown = renderBriefMarkdown(brief, {
+    selectedType,
+    practiceArea,
+    mismatched,
+  });
 
   await db
     .update(enquiries)
@@ -237,7 +331,7 @@ export async function buildCaseBrief(enquiryId: string): Promise<TriageOutcome> 
       contactName: brief.contactName || null,
       contactEmail: brief.contactEmail || null,
       contactPhone: brief.contactPhone || null,
-      practiceAreaPredicted: brief.practiceArea,
+      practiceAreaPredicted: practiceArea,
       urgency: brief.safetyConcern ? 'critical' : brief.urgency,
       confidence: brief.confidence,
       caseBriefMd: briefMarkdown,
@@ -266,11 +360,30 @@ export async function buildCaseBrief(enquiryId: string): Promise<TriageOutcome> 
 }
 
 /** The brief a lawyer reads on the dashboard and in the notification email. */
-export function renderBriefMarkdown(brief: CaseBrief): string {
+export function renderBriefMarkdown(
+  brief: CaseBrief,
+  routing?: {
+    selectedType: string | null;
+    practiceArea: PracticeArea;
+    mismatched: boolean;
+  },
+): string {
   const sections: string[] = [];
 
   if (brief.safetyConcern) {
     sections.push('> **Safety concern disclosed during intake. Handle personally.**');
+  }
+
+  // Surfaced, never resolved silently. One of the two is wrong and it is not
+  // always the client — someone who picks "Corporate & Commercial" and then
+  // describes a tenancy dispute may have misread the list, or may have a
+  // corporate landlord and be entirely right.
+  if (routing?.mismatched) {
+    const selected = enquiryTypeById(routing.selectedType);
+    sections.push(
+      `> **Check the routing.** The enquirer chose ${selected?.label ?? routing.selectedType}; ` +
+        `this has been filed as ${routing.practiceArea.replace(/_/g, ' ')}. Confirm before the consultation.`,
+    );
   }
 
   sections.push(`**Summary**\n\n${brief.summary}`);

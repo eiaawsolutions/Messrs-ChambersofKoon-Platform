@@ -1,5 +1,5 @@
 import 'server-only';
-import { and, count, desc, eq, or } from 'drizzle-orm';
+import { and, count, desc, eq, or, sql, type SQL } from 'drizzle-orm';
 import { db } from '@/lib/db/client';
 import {
   appointmentProposals,
@@ -8,9 +8,13 @@ import {
   exceptionTasks,
   matters,
   users,
+  type Office,
 } from '@/lib/db/schema';
 import { can, matterScopeFilter, type Actor } from '@/lib/auth/guard';
-import { PERMISSIONS } from '@/lib/auth/permissions';
+import { PERMISSIONS, type PermissionKey } from '@/lib/auth/permissions';
+
+/** Matches nothing. Used when a permission is absent entirely. */
+const DENY_ALL: SQL = sql`false`;
 
 /**
  * Read models for the authenticated pages.
@@ -21,11 +25,62 @@ import { PERMISSIONS } from '@/lib/auth/permissions';
  * resolved an actor first, so an unscoped read cannot be written by accident.
  */
 
-export async function pendingProposalsFor(actor: Actor) {
+/**
+ * Office/practice-area predicate for enquiry-shaped rows (FR-8.5).
+ *
+ * `matterScopeFilter` cannot serve here: an enquiry is not a matter and has no
+ * assignee until it is routed, so the matter predicate would filter on columns
+ * that do not exist. This is its counterpart, reading `enquiries.office`.
+ *
+ * `own` deliberately resolves to the office predicate rather than to nothing.
+ * An enquiry awaiting triage belongs to no one by definition — that is what
+ * makes it a review item — so an "own" reading would empty the queue FR-2.6
+ * requires a human to work through. No stock role grants `intake.view` at
+ * `own`; this only decides what a custom role built through FR-1.6 does.
+ */
+function enquiryScopeFilter(actor: Actor, permission: PermissionKey): SQL | null {
+  const scope = actor.grants[permission];
+  if (!scope) return DENY_ALL;
+  if (scope === 'all') return null;
+
+  const officeMatch = eq(enquiries.office, actor.office);
+  if (actor.practiceAreas && actor.practiceAreas.length > 0) {
+    const areaMatch = or(
+      ...actor.practiceAreas.map((area) => eq(enquiries.practiceAreaPredicted, area)),
+    );
+    return and(officeMatch, areaMatch!)!;
+  }
+  return officeMatch;
+}
+
+/**
+ * A caller who may read every office can narrow to one (FR-8.5, the per-office
+ * view). A caller who may not is unaffected by the parameter — their own scope
+ * has already been applied and this can only narrow further, never widen.
+ */
+function officeView(scoped: SQL | null, office: Office | null): SQL | null {
+  if (!office) return scoped;
+  const pick = eq(enquiries.office, office);
+  return scoped ? and(scoped, pick)! : pick;
+}
+
+export async function pendingProposalsFor(actor: Actor, office: Office | null = null) {
   if (!can(actor, PERMISSIONS.PROPOSAL_DECIDE)) return [];
 
   const scope = actor.grants[PERMISSIONS.PROPOSAL_DECIDE];
   const mineOnly = scope === 'own';
+
+  /*
+   * An office-scoped practice lead sees their own office's queue and no other.
+   * Before this predicate existed only `own` was special-cased, so every scope
+   * above it read as firm-wide — a Petaling Jaya lead was shown Kuala Lumpur's
+   * proposals, with the enquirer's name and case brief attached.
+   */
+  const scoped = mineOnly
+    ? eq(appointmentProposals.proposedUserId, actor.id)
+    : enquiryScopeFilter(actor, PERMISSIONS.PROPOSAL_DECIDE);
+
+  const visible = officeView(scoped, office);
 
   return db
     .select({
@@ -46,11 +101,8 @@ export async function pendingProposalsFor(actor: Actor) {
     .innerJoin(enquiries, eq(enquiries.id, appointmentProposals.enquiryId))
     .innerJoin(users, eq(users.id, appointmentProposals.proposedUserId))
     .where(
-      mineOnly
-        ? and(
-            eq(appointmentProposals.state, 'pending'),
-            eq(appointmentProposals.proposedUserId, actor.id),
-          )
+      visible
+        ? and(eq(appointmentProposals.state, 'pending'), visible)
         : eq(appointmentProposals.state, 'pending'),
     )
     .orderBy(appointmentProposals.startsAt)
@@ -89,17 +141,34 @@ export async function openExceptionsFor(actor: Actor, limit = 8) {
     .limit(limit);
 }
 
-export async function needsHumanReviewCount(actor: Actor): Promise<number> {
+export async function needsHumanReviewCount(
+  actor: Actor,
+  office: Office | null = null,
+): Promise<number> {
   if (!can(actor, PERMISSIONS.INTAKE_VIEW)) return 0;
+
+  const visible = officeView(enquiryScopeFilter(actor, PERMISSIONS.INTAKE_VIEW), office);
+
   const [row] = await db
     .select({ value: count() })
     .from(enquiries)
-    .where(eq(enquiries.status, 'needs_review'));
+    .where(
+      visible
+        ? and(eq(enquiries.status, 'needs_review'), visible)
+        : eq(enquiries.status, 'needs_review'),
+    );
   return row?.value ?? 0;
 }
 
-export async function enquiriesNeedingReview(actor: Actor, limit = 40) {
+export async function enquiriesNeedingReview(
+  actor: Actor,
+  office: Office | null = null,
+  limit = 40,
+) {
   if (!can(actor, PERMISSIONS.INTAKE_VIEW)) return [];
+
+  const visible = officeView(enquiryScopeFilter(actor, PERMISSIONS.INTAKE_VIEW), office);
+  const unresolved = or(eq(enquiries.status, 'needs_review'), eq(enquiries.status, 'new'))!;
 
   return db
     .select({
@@ -111,10 +180,12 @@ export async function enquiriesNeedingReview(actor: Actor, limit = 40) {
       confidence: enquiries.confidence,
       caseBriefMd: enquiries.caseBriefMd,
       status: enquiries.status,
+      office: enquiries.office,
+      duplicateOfEnquiryId: enquiries.duplicateOfEnquiryId,
       createdAt: enquiries.createdAt,
     })
     .from(enquiries)
-    .where(or(eq(enquiries.status, 'needs_review'), eq(enquiries.status, 'new')))
+    .where(visible ? and(unresolved, visible) : unresolved)
     .orderBy(desc(enquiries.createdAt))
     .limit(limit);
 }

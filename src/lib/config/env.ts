@@ -57,6 +57,31 @@ const nonSecretSchema = z.object({
 
   WIDGET_PUBLIC_KEY: z.string().default('cok_public_dev_key'),
   WIDGET_ALLOWED_ORIGINS: z.string().default(''),
+
+  /**
+   * Terms and privacy policy the enquirer accepts before any intake begins.
+   *
+   * The firm's existing website form makes this a mandatory tick, so the widget
+   * that replaces it has to capture the same thing or the change is a
+   * regression on a legal control, not an upgrade.
+   *
+   * TERMS_VERSION is recorded against each acceptance. When the firm revises
+   * either document, bump this: an acceptance is only evidence if it says what
+   * was accepted (PDPA s.6 — consent must be capable of proof).
+   */
+  // Canonical form, verified against the live site on 2026-08-12: the www
+  // host and the trailing slash both matter. The earlier apex-domain guess
+  // relied on two redirects that nobody had checked.
+  TERMS_URL: z.string().url().default('https://www.chambersofkoon.com.my/terms-conditions/'),
+  PRIVACY_URL: z.string().url().default('https://www.chambersofkoon.com.my/privacy-policy/'),
+  /**
+   * Neither published document carries a revision date of its own (checked
+   * 2026-08-12), so this is the date the firm's wording was captured, not a
+   * version the firm publishes. It is still the only thing tying an
+   * acceptance to a specific text — which is why the documents should carry
+   * their own "last updated" line, and this should then follow it.
+   */
+  TERMS_VERSION: z.string().default('2026-08-12'),
   TURNSTILE_ENABLED: z
     .string()
     .default('false')

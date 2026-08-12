@@ -26,8 +26,18 @@ export interface CreateEnquiryInput {
   contactEmail?: string | null;
   contactPhone?: string | null;
   office?: Office | null;
+  /** The firm's public enquiry type the person picked, if they picked one. */
+  enquiryTypeSelected?: string | null;
   /** Present for the no-JS form path, which arrives as one complete message. */
   initialMessage?: string;
+  /**
+   * The version of the terms and privacy policy the enquirer accepted.
+   *
+   * Required: there is no path that creates an enquiry without it, because
+   * there is no lawful path that starts processing someone's personal data
+   * before they have agreed to it.
+   */
+  termsVersion: string;
 }
 
 export interface CreatedEnquiry {
@@ -53,6 +63,9 @@ export async function createEnquiry(input: CreateEnquiryInput): Promise<CreatedE
       contactName: input.contactName ?? null,
       contactEmail: input.contactEmail ?? null,
       contactPhone: input.contactPhone ?? null,
+      enquiryTypeSelected: input.enquiryTypeSelected ?? null,
+      termsAcceptedAt: new Date(),
+      termsVersion: input.termsVersion,
       rawPayload: {
         origin: input.origin ?? null,
         userAgent: input.userAgent ?? null,
@@ -78,7 +91,13 @@ export async function createEnquiry(input: CreateEnquiryInput): Promise<CreatedE
     entityId: created.id,
     ip: input.ip ?? null,
     userAgent: input.userAgent ?? null,
-    metadata: { source: input.source, origin: input.origin ?? null },
+    metadata: {
+      source: input.source,
+      origin: input.origin ?? null,
+      // The acceptance belongs in the append-only log too. The enquiry row can
+      // be corrected; an audit event cannot.
+      termsVersion: input.termsVersion,
+    },
   });
 
   return { id: created.id, sessionToken };

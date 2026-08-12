@@ -421,6 +421,44 @@ export const enquiries = pgTable(
      */
     sessionToken: varchar('session_token', { length: 64 }),
     submittedIp: varchar('submitted_ip', { length: 64 }),
+    /**
+     * Acceptance of the terms and privacy policy (PDPA §7.2).
+     *
+     * Captured as an explicit act in the widget or the fallback form — never
+     * inferred by the model from something the enquirer typed. "Yes, fine" in
+     * a chat transcript is not consent a firm can produce to a regulator, and
+     * a model that misreads it manufactures consent that was never given.
+     *
+     * The version records *what* was accepted; the timestamp and IP record
+     * when and from where. All three are needed for the acceptance to prove
+     * anything later.
+     */
+    termsAcceptedAt: timestamp('terms_accepted_at', { withTimezone: true }),
+    termsVersion: varchar('terms_version', { length: 40 }),
+    /**
+     * The enquiry type the person chose or confirmed, in the firm's own public
+     * vocabulary — kept alongside `practiceAreaPredicted` rather than folded
+     * into it.
+     *
+     * They answer different questions. This is what the client asked for; the
+     * practice area is where the firm filed it. When the two disagree, a
+     * lawyer needs to see both before the consultation, because one of them is
+     * wrong and it is not always the client.
+     */
+    enquiryTypeSelected: varchar('enquiry_type_selected', { length: 40 }),
+    /**
+     * The earlier enquiry this one repeats (FR-2.8).
+     *
+     * Set rather than merged, and the row is always kept. A second enquiry from
+     * the same address inside 24 hours is usually the same person adding
+     * something they forgot, occasionally a different family member, and only
+     * sometimes abuse — so this records the link and lets a human read both,
+     * instead of dropping the newer one on a guess.
+     *
+     * Not a foreign key, matching `supersedesProposalId`: purging the older
+     * enquiry at its retention date (NFR-2.2) must not cascade into the newer.
+     */
+    duplicateOfEnquiryId: uuid('duplicate_of_enquiry_id'),
     modelVersion: varchar('model_version', { length: 80 }),
     promptHash: varchar('prompt_hash', { length: 64 }),
     createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
@@ -548,6 +586,13 @@ export const appointments = pgTable(
   (t) => [
     index('appointments_user_time_idx').on(t.userId, t.startsAt),
     index('appointments_matter_idx').on(t.matterId),
+    /**
+     * The lookup path for the public reschedule link (FR-3.8). Unique rather
+     * than plain: nulls are distinct in Postgres, so any number of appointments
+     * may carry no token, but a live token resolves to exactly one — a
+     * collision would hand one client another's consultation.
+     */
+    uniqueIndex('appointments_reschedule_token_uq').on(t.rescheduleTokenHash),
   ],
 );
 
@@ -721,6 +766,37 @@ export const chunks = pgTable(
     index('chunks_matter_idx').on(t.matterId),
     index('chunks_area_idx').on(t.practiceArea),
     unique('chunks_source_index_uq').on(t.sourceType, t.sourceId, t.chunkIndex),
+  ],
+);
+
+/**
+ * Saved precedent searches (FR-8.5).
+ *
+ * The query and its filters, never the results. A saved search re-runs under
+ * the *reader's* scope every time it is opened, so a search saved by a partner
+ * and later opened by a pupil returns the pupil's permitted excerpts and not
+ * the partner's — storing result sets would have quietly created a way to hand
+ * matter content across the permission boundary.
+ */
+export const savedSearches = pgTable(
+  'saved_searches',
+  {
+    id: uuid('id').primaryKey().defaultRandom(),
+    userId: uuid('user_id')
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    name: varchar('name', { length: 120 }).notNull(),
+    query: text('query').notNull(),
+    practiceArea: practiceAreaEnum('practice_area'),
+    office: officeEnum('office'),
+    /** YYYY-MM-DD, matching the form fields they came from. */
+    dateFrom: varchar('date_from', { length: 10 }),
+    dateTo: varchar('date_to', { length: 10 }),
+    createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    index('saved_searches_user_idx').on(t.userId, t.createdAt),
+    unique('saved_searches_user_name_uq').on(t.userId, t.name),
   ],
 );
 

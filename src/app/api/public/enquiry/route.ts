@@ -9,9 +9,15 @@ import {
   resolveAllowedOrigin,
   verifyTurnstile,
 } from '@/lib/intake/protection';
+import { config } from '@/lib/config/env';
 import { findEnquiryBySession, respondToTurn } from '@/lib/intake/triage';
 import { closeSession, createEnquiry, markNeedsReview } from '@/lib/intake/enquiries';
-import { enqueue, JOBS } from '@/lib/jobs/queue';
+import { handOverToFirm } from '@/lib/intake/handover';
+import {
+  composeInitialMessage,
+  parseEnquiryDetails,
+  type DetailErrors,
+} from '@/lib/intake/details';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -30,19 +36,54 @@ export const dynamic = 'force-dynamic';
 
 const turnSchema = z.object({
   sessionToken: z.string().min(16).max(64).optional(),
-  message: z.string().min(1).max(4000),
+  /**
+   * Required to continue a conversation, optional to start one.
+   *
+   * The opening screen is the firm's enquiry form, whose message box is
+   * optional — the four required answers are themselves an enquiry, and
+   * refusing one because the person had nothing to add would lose it.
+   */
+  message: z.string().max(4000).optional(),
   turnstileToken: z.string().max(4000).optional(),
-  /** Set by the fallback form (FR-2.2) so we can capture contact details. */
-  contactName: z.string().max(200).optional(),
-  contactEmail: z.string().max(320).optional(),
-  contactPhone: z.string().max(40).optional(),
+  /**
+   * Name, email, contact number and enquiry type, from the opening form.
+   *
+   * Read only when a conversation is being created. Left unknown here and
+   * handed to parseEnquiryDetails, which is the single authority both entry
+   * points share — validating the shape twice, in two places, is how the
+   * widget and the form come to disagree about what a phone number is.
+   */
+  details: z.unknown().optional(),
   office: z.enum(['KL', 'PJ', 'IPOH']).optional(),
+  /**
+   * The enquirer ticked the acceptance box on the opening form. Only read when
+   * a conversation is being created — once an enquiry exists the acceptance is
+   * already on the row and the client cannot revise it.
+   */
+  termsAccepted: z.literal(true).optional(),
 });
 
 function reject(status: number, message: string, origin: string | null): NextResponse {
   return NextResponse.json(
     { error: message },
     { status, headers: { ...corsHeaders(origin), 'cache-control': 'no-store' } },
+  );
+}
+
+/**
+ * A refusal that names the fields at fault.
+ *
+ * The uniform-vagueness rule above is about system state — whether a session
+ * exists, whether a limit was hit — because the difference is a reconnaissance
+ * signal. It does not apply to the caller's own submitted data: telling
+ * someone their email address is malformed reveals nothing they did not just
+ * type, and withholding it would mean an enquirer staring at a form with no
+ * idea which box to fix. Codes, never free text, so nothing supplied is echoed.
+ */
+function rejectDetails(errors: DetailErrors, origin: string | null): NextResponse {
+  return NextResponse.json(
+    { error: 'Some details need correcting', fields: errors },
+    { status: 400, headers: { ...corsHeaders(origin), 'cache-control': 'no-store' } },
   );
 }
 
@@ -111,7 +152,33 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     if (enquiryId) sessionToken = payload.sessionToken;
   }
 
+  /**
+   * The message this turn puts into the transcript.
+   *
+   * Opening a conversation, it is built from the details; continuing one, it
+   * is what the person typed. Assigned in both branches below so the converse
+   * step has one input regardless of which it was.
+   */
+  let userMessage: string;
+
   if (!enquiryId) {
+    // No enquiry may be created without acceptance. This is the only gate —
+    // a stale or refused token falls through to here, so a returning browser
+    // accepts again for the new conversation rather than inheriting consent
+    // given for a different matter, possibly by a different person.
+    if (payload.termsAccepted !== true) {
+      return reject(400, 'The terms and privacy policy must be accepted.', origin);
+    }
+
+    // The opening form is the gate, not a formality: an enquiry the firm
+    // cannot reply to is worth less than no enquiry at all, because it also
+    // consumes a lawyer's attention. Parsed before the rate-limit slot is
+    // spent so a correctable typo does not cost someone their attempt.
+    const parsed = parseEnquiryDetails(payload.details);
+    if (!parsed.ok) {
+      return rejectDetails(parsed.errors, origin);
+    }
+
     const newConversation = await checkRateLimit(
       `new:${ip ?? 'unknown'}`,
       RATE_LIMITS.newConversationPerIp,
@@ -122,40 +189,58 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     const created = await createEnquiry({
       source: 'widget',
+      termsVersion: config().TERMS_VERSION,
       ip,
       userAgent: request.headers.get('user-agent'),
       origin,
       office: payload.office ?? null,
-      contactName: payload.contactName ?? null,
-      contactEmail: payload.contactEmail ?? null,
-      contactPhone: payload.contactPhone ?? null,
+      contactName: parsed.details.contactName,
+      contactEmail: parsed.details.contactEmail,
+      contactPhone: parsed.details.contactPhone,
+      enquiryTypeSelected: parsed.details.enquiryType,
     });
 
     if (!created) return reject(500, 'Could not start the conversation', origin);
     enquiryId = created.id;
     sessionToken = created.sessionToken;
+    userMessage = composeInitialMessage(parsed.details);
+  } else {
+    // A turn inside an existing conversation is only ever a message. Details
+    // sent here are ignored rather than applied: the acceptance and the
+    // contact record belong to the enquiry a lawyer is being briefed on, and
+    // an unauthenticated caller holding a token must not be able to rewrite
+    // whose enquiry it is.
+    const message = payload.message?.trim() ?? '';
+    if (message.length === 0) {
+      return reject(400, 'Invalid request', origin);
+    }
+    userMessage = message;
   }
 
   // Converse.
   try {
-    const turn = await respondToTurn({ enquiryId, userMessage: payload.message });
+    const turn = await respondToTurn({ enquiryId, userMessage });
+    let reply = turn.reply;
 
-    // When the agent has what it needs, build the brief and (if confident)
-    // propose a slot. Both run in the background so the enquirer is not left
-    // waiting on a Sonnet call plus a scheduling sweep.
+    // When the agent has what it needs, hand over to the firm: brief, then
+    // proposal, then a closing line that names the proposed slot. Run inline
+    // so the enquirer leaves with a time rather than an acknowledgement — see
+    // handOverToFirm for why that is worth the latency on this one turn.
     if (turn.readyForBrief) {
-      // Retire the session before queuing, so a message sent while the brief
-      // is being written opens a new enquiry instead of landing on the one a
-      // lawyer is about to read.
+      // Retire the session first, so a message sent while the handover runs
+      // opens a new enquiry instead of landing on the one a lawyer is about to
+      // read.
       await closeSession(enquiryId);
       sessionToken = null;
-      await enqueue(JOBS.TRIAGE_ENQUIRY, { enquiryId }, { singletonKey: `triage-${enquiryId}` });
+
+      const handover = await handOverToFirm(enquiryId);
+      reply = `${reply.trimEnd()}\n\n${handover.closingLine}`;
     }
 
     return NextResponse.json(
       {
         sessionToken,
-        reply: turn.reply,
+        reply,
         complete: turn.readyForBrief,
       },
       { headers: { ...corsHeaders(origin), 'cache-control': 'no-store' } },

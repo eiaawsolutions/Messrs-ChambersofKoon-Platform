@@ -4,10 +4,14 @@ import { enquiriesNeedingReview, pendingProposalsFor } from '@/lib/queries/dashb
 import { assertCan, can } from '@/lib/auth/guard';
 import { PERMISSIONS } from '@/lib/auth/permissions';
 import { formatSlotForClient } from '@/lib/scheduling/slots';
+import { confidenceBand } from '@/lib/intake/triage';
+import type { Office } from '@/lib/db/schema';
+import { heldEnquiries } from '@/lib/intake/duplicate-check';
 import {
   acceptProposalAction,
   declineProposalAction,
   proposeForEnquiryAction,
+  releaseEnquiryAction,
   retriageEnquiryAction,
 } from './actions';
 
@@ -19,15 +23,43 @@ export const dynamic = 'force-dynamic';
  * decline, plus the human review queue that low-confidence triage routes to
  * (FR-2.6).
  */
-export default async function IntakePage() {
+const OFFICES: Array<{ value: Office; label: string }> = [
+  { value: 'KL', label: 'Kuala Lumpur' },
+  { value: 'PJ', label: 'Petaling Jaya' },
+  { value: 'IPOH', label: 'Ipoh' },
+];
+
+export default async function IntakePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ office?: string }>;
+}) {
   const actor = await requireActor();
   assertCan(actor, PERMISSIONS.INTAKE_VIEW);
 
   const mayDecide = can(actor, PERMISSIONS.PROPOSAL_DECIDE);
 
-  const [proposals, review] = await Promise.all([
-    pendingProposalsFor(actor),
-    enquiriesNeedingReview(actor),
+  /*
+   * FR-8.5, the per-office view.
+   *
+   * Only offered to a reader whose scope already spans the firm — for everyone
+   * else the queries have narrowed to their own office before this parameter
+   * is read, and it can only narrow further. So the control is a convenience
+   * for a managing partner, never a way to widen anyone's reach.
+   */
+  const seesAllOffices = actor.grants[PERMISSIONS.INTAKE_VIEW] === 'all';
+  const params = await searchParams;
+  const officeFilter =
+    seesAllOffices && OFFICES.some((o) => o.value === params.office)
+      ? (params.office as Office)
+      : null;
+
+  const canTriage = can(actor, PERMISSIONS.INTAKE_TRIAGE);
+
+  const [proposals, review, held] = await Promise.all([
+    pendingProposalsFor(actor, officeFilter),
+    enquiriesNeedingReview(actor, officeFilter),
+    canTriage ? heldEnquiries() : Promise.resolve([]),
   ]);
 
   return (
@@ -38,6 +70,31 @@ export default async function IntakePage() {
           Enquiries triaged by the intake agent. Nothing has been sent to any enquirer — a
           consultation is confirmed only when you accept it.
         </p>
+
+        {seesAllOffices ? (
+          <form method="get" className="mt-5 flex flex-wrap items-end gap-3">
+            <div>
+              <label className="label" htmlFor="office">
+                Office
+              </label>
+              <select className="field" id="office" name="office" defaultValue={officeFilter ?? ''}>
+                <option value="">All offices</option>
+                {OFFICES.map((office) => (
+                  <option key={office.value} value={office.value}>
+                    {office.label}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button className="btn btn-secondary" type="submit">
+              Apply
+            </button>
+          </form>
+        ) : (
+          <p className="text-ink-faint mt-3 text-xs">
+            Showing {actor.office} enquiries — the offices your role covers.
+          </p>
+        )}
       </header>
 
       <section aria-labelledby="awaiting">
@@ -84,7 +141,7 @@ export default async function IntakePage() {
                     </span>
                     {typeof proposal.confidence === 'number' ? (
                       <span className="pill pill-neutral" data-numeric>
-                        {proposal.confidence}% confidence
+                        Confidence: {confidenceBand(proposal.confidence)} · {proposal.confidence}%
                       </span>
                     ) : null}
                   </div>
@@ -183,7 +240,7 @@ export default async function IntakePage() {
                     <p className="text-ink-muted mt-1 text-sm">
                       {(enquiry.practiceArea ?? 'not yet classified').replace(/_/g, ' ')}
                       {typeof enquiry.confidence === 'number'
-                        ? ` · ${enquiry.confidence}% confidence`
+                        ? ` · Confidence: ${confidenceBand(enquiry.confidence)} · ${enquiry.confidence}%`
                         : ''}
                       {' · '}
                       {new Intl.DateTimeFormat('en-MY', {
@@ -195,8 +252,22 @@ export default async function IntakePage() {
                       }).format(enquiry.createdAt)}
                     </p>
                   </div>
-                  <span className="pill pill-neutral">{enquiry.status}</span>
+                  <div className="flex flex-none flex-wrap gap-2">
+                    {/* FR-2.8. Shown as context for the person reading it, not
+                        as a verdict — the enquiry is worked either way. */}
+                    {enquiry.duplicateOfEnquiryId ? (
+                      <span className="pill pill-warning">Repeat within 24h</span>
+                    ) : null}
+                    <span className="pill pill-neutral">{enquiry.status}</span>
+                  </div>
                 </div>
+
+                {enquiry.duplicateOfEnquiryId ? (
+                  <p className="text-ink-muted mt-3 text-sm">
+                    Same email as an earlier enquiry today. Read them together before replying — it
+                    is usually one person adding something they forgot, not two matters.
+                  </p>
+                ) : null}
 
                 {enquiry.caseBriefMd ? (
                   <details className="mt-4">
@@ -236,6 +307,54 @@ export default async function IntakePage() {
           </ul>
         )}
       </section>
+
+      {/* FR-2.8. Held, never deleted — the section exists so that is true in
+          practice and not only in the commit message. */}
+      {canTriage && held.length > 0 ? (
+        <section aria-labelledby="held">
+          <h2 id="held" className="text-xl">
+            Held
+            <span className="pill pill-neutral ml-3 align-middle" data-numeric>
+              {held.length}
+            </span>
+          </h2>
+          <p className="text-ink-muted mt-3 max-w-2xl text-sm">
+            More enquiries arrived from one address in a day than a person sends. Nothing was
+            deleted and nobody was told. Release anything genuine and it rejoins the queue above.
+          </p>
+
+          <ul className="mt-5 space-y-3">
+            {held.map((enquiry) => (
+              <li
+                key={enquiry.id}
+                className="surface flex flex-wrap items-center justify-between gap-4 p-4"
+              >
+                <div className="min-w-0">
+                  <p className="text-ink text-sm font-medium">
+                    {enquiry.contactName ?? 'Enquirer (name not given)'}
+                  </p>
+                  <p className="text-ink-faint mt-1 text-xs">
+                    {enquiry.office ?? 'no office'} ·{' '}
+                    {new Intl.DateTimeFormat('en-MY', {
+                      timeZone: 'Asia/Kuala_Lumpur',
+                      day: 'numeric',
+                      month: 'short',
+                      hour: 'numeric',
+                      minute: '2-digit',
+                    }).format(enquiry.createdAt)}
+                  </p>
+                </div>
+                <form action={releaseEnquiryAction}>
+                  <input type="hidden" name="enquiryId" value={enquiry.id} />
+                  <button className="btn btn-secondary" type="submit">
+                    Release to the queue
+                  </button>
+                </form>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
     </div>
   );
 }

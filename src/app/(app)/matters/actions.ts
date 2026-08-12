@@ -12,6 +12,8 @@ import {
   createDocumentDraft,
   finaliseDocument,
 } from '@/lib/matters/service';
+import { recordRevision, RevisionRejected } from '@/lib/documents/revise';
+import { raiseException } from '@/lib/comms/milestones';
 import { audit, AUDIT_ACTIONS } from '@/lib/audit/log';
 
 /**
@@ -140,11 +142,75 @@ export async function finaliseDocumentAction(formData: FormData): Promise<void> 
       metadata: { role: actor.roleName, reason: 'not permitted' },
       ...ctx,
     });
-    throw new AuthorizationError(PERMISSIONS.DOCUMENT_FINALISE, parsed.matterId);
+
+    // The audit entry proves it happened; the exception task means someone is
+    // actually told. A blocked finalise is either a role that needs widening
+    // or a person reaching past their supervision — both are for the handling
+    // lawyer to look at, and neither should wait for an audit review.
+    await raiseException({
+      matterId: parsed.matterId,
+      kind: 'finalise_blocked',
+      title: `${actor.fullName} was blocked from finalising a document`,
+      detail:
+        `Role "${actor.roleName}" does not carry permission to finalise. ` +
+        'The attempt is in the audit log. Either the document needs a different ' +
+        'reviewer, or this person needs supervision on it.',
+    });
+
+    // Surfaced on the document page rather than as an error screen: the person
+    // did nothing wrong by trying, and a stack trace teaches them nothing.
+    redirect(`/documents/${parsed.documentId}?denied=finalise`);
   }
 
   await finaliseDocument({ actor, documentId: parsed.documentId, matterId: parsed.matterId });
 
   revalidatePath(`/documents/${parsed.documentId}`);
   revalidatePath(`/matters/${parsed.matterId}`);
+}
+
+const reviseSchema = z.object({
+  documentId: z.string().uuid(),
+  matterId: z.string().uuid(),
+  note: z.string().max(2000).optional(),
+});
+
+/**
+ * FR-4.6: the lawyer's amended .docx becomes the next version.
+ *
+ * Gated on DOCUMENT_GENERATE, not DOCUMENT_FINALISE — amending a draft is
+ * drafting. A pupil may revise; only an associate and above may finalise.
+ */
+export async function reviseDocumentAction(formData: FormData): Promise<void> {
+  const parsed = reviseSchema.parse({
+    documentId: formData.get('documentId'),
+    matterId: formData.get('matterId'),
+    note: formData.get('note') || undefined,
+  });
+
+  const { actor } = await authorise(parsed.matterId, PERMISSIONS.DOCUMENT_GENERATE);
+
+  const file = formData.get('file');
+  if (!(file instanceof File) || file.size === 0) {
+    redirect(`/documents/${parsed.documentId}?revision=no_file`);
+  }
+
+  let outcome: 'saved' | string;
+  try {
+    await recordRevision({
+      actor,
+      documentId: parsed.documentId,
+      matterId: parsed.matterId,
+      filename: file.name,
+      bytes: Buffer.from(await file.arrayBuffer()),
+      note: parsed.note ?? null,
+    });
+    outcome = 'saved';
+  } catch (error) {
+    if (!(error instanceof RevisionRejected)) throw error;
+    outcome = error.code;
+  }
+
+  revalidatePath(`/documents/${parsed.documentId}`);
+  revalidatePath(`/matters/${parsed.matterId}`);
+  redirect(`/documents/${parsed.documentId}?revision=${outcome}`);
 }

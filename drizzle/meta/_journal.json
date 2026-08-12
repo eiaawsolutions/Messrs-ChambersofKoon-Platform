@@ -22,6 +22,27 @@
       "when": 1786467328479,
       "tag": "0002_intake_session_uniqueness",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1786474369761,
+      "tag": "0003_intake_consent",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1786475388926,
+      "tag": "0004_enquiry_type_selected",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1786552557372,
+      "tag": "0005_platform_gaps",
+      "breakpoints": true
     }
   ]
 }

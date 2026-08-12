@@ -8,6 +8,7 @@ import {
   enquiries,
   messages,
   publicHolidays,
+  roles,
   users,
   type Office,
   type PracticeArea,
@@ -38,7 +39,7 @@ import type { Actor } from '@/lib/auth/guard';
  * both require an actor who holds proposal.decide.
  */
 
-async function loadHolidayKeys(office: Office): Promise<Set<string>> {
+export async function loadHolidayKeys(office: Office): Promise<Set<string>> {
   const rows = await db
     .select({ date: publicHolidays.date, office: publicHolidays.office })
     .from(publicHolidays)
@@ -126,6 +127,8 @@ export interface ProposalResult {
   slot: Slot;
   lawyerName: string;
   expiresAt: Date;
+  /** The office the slot resolved to — a Slot carries only user and time. */
+  office: Office;
 }
 
 /**
@@ -193,10 +196,30 @@ export async function proposeSlot(enquiryId: string): Promise<ProposalResult | n
   await db.update(enquiries).set({ status: 'slot_proposed' }).where(eq(enquiries.id, enquiryId));
 
   const [lawyer] = await db
-    .select({ fullName: users.fullName, email: users.email })
+    .select({
+      fullName: users.fullName,
+      email: users.email,
+      roleName: roles.name,
+      office: users.office,
+    })
     .from(users)
+    .leftJoin(roles, eq(roles.id, users.roleId))
     .where(eq(users.id, slot.userId))
     .limit(1);
+
+  // FR-2.5: the brief a lawyer opens should say who it is for. Appended once
+  // the routing is decided rather than written by the briefing model, which
+  // has no knowledge of availability and would be guessing at a name.
+  if (lawyer) {
+    const lead =
+      `**Suggested lead**\n\n${lawyer.fullName}` +
+      (lawyer.roleName ? ` — ${lawyer.roleName}` : '') +
+      ` (${lawyer.office})`;
+    await db
+      .update(enquiries)
+      .set({ caseBriefMd: sql`coalesce(${enquiries.caseBriefMd} || '\n\n', '') || ${lead}` })
+      .where(eq(enquiries.id, enquiryId));
+  }
 
   await audit({
     action: AUDIT_ACTIONS.PROPOSAL_CREATED,
@@ -247,6 +270,7 @@ export async function proposeSlot(enquiryId: string): Promise<ProposalResult | n
     slot,
     lawyerName: lawyer?.fullName ?? 'Unassigned',
     expiresAt,
+    office,
   };
 }
 
@@ -320,6 +344,59 @@ export async function acceptProposal(params: {
     .limit(1);
 
   const office = enquiry?.office ?? 'KL';
+
+  /*
+   * An enquiry that already has a confirmed consultation is being *moved*, not
+   * booked — the client asked through their reschedule link (FR-3.8), or a
+   * lawyer proposed a new time for one already in the diary.
+   *
+   * FR-3.7 governs what happens next: same UID, SEQUENCE + 1, so the calendar
+   * entry the client already accepted updates in place. Inserting a second
+   * appointment row here would issue a second UID, and every mail client would
+   * treat it as an additional consultation rather than a change to the
+   * existing one — leaving the client holding two.
+   */
+  const [existing] = await db
+    .select({ id: appointments.id })
+    .from(appointments)
+    .where(and(eq(appointments.enquiryId, proposal.enquiryId), eq(appointments.state, 'confirmed')))
+    .limit(1);
+
+  if (existing) {
+    await db
+      .update(appointmentProposals)
+      .set({ state: 'accepted', decidedAt: new Date(), decidedByUserId: params.actor.id })
+      .where(eq(appointmentProposals.id, proposal.id));
+
+    // A client reschedule request moved the enquiry to `slot_proposed` while it
+    // waited for this decision. Without putting it back, an enquiry with a
+    // confirmed consultation in the diary would keep reading as one still
+    // awaiting a slot — and would be counted as such on the intake queue.
+    await db
+      .update(enquiries)
+      .set({ status: 'booked' })
+      .where(eq(enquiries.id, proposal.enquiryId));
+
+    await rescheduleAppointment({
+      actor: params.actor,
+      appointmentId: existing.id,
+      startsAt: proposal.startsAt,
+      endsAt: proposal.endsAt,
+    });
+
+    const [moved] = await db
+      .select({ icsUid: appointments.icsUid, icsSequence: appointments.icsSequence })
+      .from(appointments)
+      .where(eq(appointments.id, existing.id))
+      .limit(1);
+
+    return {
+      appointmentId: existing.id,
+      icsUid: moved?.icsUid ?? '',
+      sequence: moved?.icsSequence ?? 0,
+    };
+  }
+
   const rescheduleToken = randomToken(24);
 
   const [appointment] = await db
